@@ -121,6 +121,9 @@ class XArmRobot(Robot):
     GRIPPER_CLOSE = 0
     #  MAX_DELTA = 0.2
     DEFAULT_MAX_DELTA = 0.05
+    _JOINT_LIMIT_MARGIN = 1e-3
+    _JOINT_LIMIT_MAX = np.array([2 * np.pi - _JOINT_LIMIT_MARGIN] * 7)
+    _JOINT_LIMIT_MIN = -_JOINT_LIMIT_MAX
 
     def num_dofs(self) -> int:
         return 8
@@ -132,6 +135,7 @@ class XArmRobot(Robot):
         return all_dofs
 
     def command_joint_state(self, joint_state: np.ndarray) -> None:
+        joint_state = np.asarray(joint_state, dtype=float)
         if len(joint_state) == 7:
             self.set_command(joint_state, None)
         elif len(joint_state) == 8:
@@ -188,6 +192,9 @@ class XArmRobot(Robot):
             return self.last_state
 
     def set_command(self, joints: np.ndarray, gripper: Optional[float] = None) -> None:
+        joints = np.asarray(joints, dtype=float)
+        joints = self._wrap_relative_to_current(joints)
+        joints = self._apply_joint_limits(joints)
         with self.target_command_lock:
             self.target_command = {
                 "joints": joints,
@@ -209,12 +216,12 @@ class XArmRobot(Robot):
         time.sleep(1)
         self.robot.set_collision_sensitivity(0)
         time.sleep(1)
-        self.robot.set_state(state=0)
-        time.sleep(1)
-        self.robot.set_mode(1)
-        time.sleep(1)
-        self.robot.set_state(state=0)
-        time.sleep(1)
+        #self.robot.set_state(state=0)
+        #time.sleep(1)
+        #self.robot.set_mode(1)
+        #time.sleep(1)
+        #self.robot.set_state(state=0)
+        #time.sleep(1)
         self.robot.set_gripper_enable(True)
         time.sleep(1)
         self.robot.set_gripper_mode(0)
@@ -270,10 +277,10 @@ class XArmRobot(Robot):
             else:
                 delta = joint_delta
 
-            # command position
-            self._set_position(
-                self.last_state.joints() + delta,
-            )
+            if norm > 1e-6:
+                self._set_position(
+                    self.last_state.joints() + delta,
+                )
 
             if gripper_command is not None:
                 set_point = gripper_command
@@ -331,11 +338,22 @@ class XArmRobot(Robot):
     ) -> None:
         if self.robot is None:
             return
-        # threhold xyz to be in  min max
-        print("joints: ", joints)
-        ret = self.robot.set_servo_angle_j(joints, wait=False, is_radian=True)
-        if ret in [1, 9]:
+        limited_joints = self._apply_joint_limits(joints)
+        ret = self.robot.set_servo_angle_j(limited_joints, wait=False, is_radian=True)
+        if ret in [1, 9, -8]:
             self._clear_error_states()
+            if ret == -8:
+                # attempt to bring the command back within joint range by wrapping to the nearest revolution
+                wrapped_joints = self._wrap_relative_to_current(limited_joints)
+                wrapped_joints = self._apply_joint_limits(wrapped_joints)
+                if not np.allclose(wrapped_joints, limited_joints):
+                    ret = self.robot.set_servo_angle_j(
+                        wrapped_joints, wait=False, is_radian=True
+                    )
+                    if ret not in (0,):
+                        print(
+                            f"[WARN] Failed to recover from joint limit violation. code={ret}, joints={wrapped_joints}"
+                        )
 
     def get_observations(self) -> Dict[str, np.ndarray]:
         state = self.get_state()
@@ -347,6 +365,25 @@ class XArmRobot(Robot):
             "ee_pos_quat": pos_quat,
             "gripper_position": np.array(state.gripper_pos()),
         }
+
+    def _wrap_relative_to_current(self, joints: np.ndarray) -> np.ndarray:
+        """Wrap commanded joints to stay close to the current configuration.
+
+        Some joints (e.g. with 360° range) can report equivalent poses that differ by
+        multiples of 2π. When the teleop leader crosses the ±π boundary, the follower
+        may receive angles slightly outside the hardware limits (e.g. 2π + ε).  By
+        wrapping the command relative to the current state we keep the motion
+        continuous and avoid transient out-of-range codes from the controller.
+        """
+        current = self.get_state().joints()
+        deltas = joints - current
+        wrapped_deltas = (deltas + np.pi) % (2 * np.pi) - np.pi
+        return current + wrapped_deltas
+
+    def _apply_joint_limits(self, joints: np.ndarray) -> np.ndarray:
+        joints = np.asarray(joints, dtype=float)
+        clipped = np.clip(joints, self._JOINT_LIMIT_MIN, self._JOINT_LIMIT_MAX)
+        return clipped
 
 
 def main():
