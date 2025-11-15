@@ -214,9 +214,9 @@ class XArmRobot(Robot):
         time.sleep(1)
         self.robot.set_mode(0)
         time.sleep(1)
-        self.robot.set_collision_sensitivity(0)
-        time.sleep(1)
-
+        
+        #self.robot.set_collision_sensitivity(0)
+        #time.sleep(1)
         #self.robot.set_state(state=0)
         #time.sleep(1)
         #self.robot.set_mode(1)

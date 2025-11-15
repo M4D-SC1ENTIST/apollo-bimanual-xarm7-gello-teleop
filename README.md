@@ -19,3 +19,16 @@
     uv pip install -e .
     uv pip install -e third_party/DynamixelSDK/python
     ```
+
+## Usage
+
+- Run teleop
+    ```
+    python launch_teleop.py --arm-to-use <arm_to_use>
+    ```
+    for example
+    ```
+    python launch_teleop.py --arm-to-use left --viewpoint-option none
+    python launch_teleop.py --arm-to-use right --viewpoint-option none
+    python launch_teleop.py --arm-to-use both --viewpoint-option coffee
+    ```
