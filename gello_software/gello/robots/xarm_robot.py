@@ -216,12 +216,14 @@ class XArmRobot(Robot):
         time.sleep(1)
         self.robot.set_collision_sensitivity(0)
         time.sleep(1)
+
         #self.robot.set_state(state=0)
         #time.sleep(1)
         #self.robot.set_mode(1)
         #time.sleep(1)
         #self.robot.set_state(state=0)
         #time.sleep(1)
+        
         self.robot.set_gripper_enable(True)
         time.sleep(1)
         self.robot.set_gripper_mode(0)

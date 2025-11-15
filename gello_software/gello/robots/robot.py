@@ -105,6 +105,13 @@ class BimanualRobot(Robot):
     def get_observations(self) -> Dict[str, np.ndarray]:
         l_obs = self._robot_l.get_observations()
         r_obs = self._robot_r.get_observations()
+        
+        # Ensure gripper_position observations are at least 1-D for concatenation
+        for obs in (l_obs, r_obs):
+            if "gripper_position" in obs:
+                obs["gripper_position"] = np.atleast_1d(obs["gripper_position"])
+
+
         assert l_obs.keys() == r_obs.keys()
         return_obs = {}
         for k in l_obs.keys():

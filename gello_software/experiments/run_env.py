@@ -60,8 +60,8 @@ def main(args):
     if args.bimanual:
         if args.agent == "gello":
             # dynamixel control box port map (to distinguish left and right gello)
-            right = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7WBG6A-if00-port0"
-            left = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FT7WBEIA-if00-port0"
+            right = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRM7P-if00-port0"
+            left = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKROCJ-if00-port0"
             agent_cfg = {
                 "_target_": "gello.agents.agent.BimanualAgent",
                 "agent_left": {
@@ -111,8 +111,8 @@ def main(args):
 
         # System setup specific. This reset configuration works well on our setup. If you are mounting the robot
         # differently, you need a separate reset joint configuration.
-        reset_joints_left = np.deg2rad([0, -90, -90, -90, 90, 0, 0])
-        reset_joints_right = np.deg2rad([0, -90, 90, -90, -90, 0, 0])
+        reset_joints_left = np.array([1.62448565, -0.84829138, -2.4190877, 1.40052446, -0.63813601, 1.26400017, -0.69796126, 0.0])
+        reset_joints_right = np.array([1.009359, 0.704097, 0.208621, 1.537049, 6.211088, 1.013946, 1.191903, 0.00375])
         reset_joints = np.concatenate([reset_joints_left, reset_joints_right])
         curr_joints = env.get_obs()["joint_positions"]
         max_delta = (np.abs(curr_joints - reset_joints)).max()
