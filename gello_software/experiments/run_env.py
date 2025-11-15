@@ -35,7 +35,7 @@ class Args:
     mock: bool = False
     use_save_interface: bool = False
     data_dir: str = "~/bc_data"
-    bimanual: bool = False
+    arm_to_use: str = "right" # "left", "right", "both"
     verbose: bool = False
 
     def __post_init__(self):
@@ -57,7 +57,7 @@ def main(args):
     env = RobotEnv(robot_client, control_rate_hz=args.hz, camera_dict=camera_clients)
 
     agent_cfg = {}
-    if args.bimanual:
+    if args.arm_to_use == "both":
         if args.agent == "gello":
             # dynamixel control box port map (to distinguish left and right gello)
             right = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRM7P-if00-port0"
@@ -111,15 +111,32 @@ def main(args):
 
         # System setup specific. This reset configuration works well on our setup. If you are mounting the robot
         # differently, you need a separate reset joint configuration.
-        reset_joints_left = np.array([1.62448565, -0.84829138, -2.4190877, 1.40052446, -0.63813601, 1.26400017, -0.69796126, 0.0])
-        reset_joints_right = np.array([1.009359, 0.704097, 0.208621, 1.537049, 6.211088, 1.013946, 1.191903, 0.00375])
-        reset_joints = np.concatenate([reset_joints_left, reset_joints_right])
-        curr_joints = env.get_obs()["joint_positions"]
-        max_delta = (np.abs(curr_joints - reset_joints)).max()
-        steps = min(int(max_delta / 0.01), 100)
+        #reset_joints_left = np.array([1.62448565, -0.84829138, -2.4190877, 1.40052446, -0.63813601, 1.26400017, -0.69796126, 0.0])
+        #reset_joints_right = np.array([1.009359, 0.704097, 0.208621, 1.537049, 6.211088, 1.013946, 1.191903, 0.00375])
+        #reset_joints = np.concatenate([reset_joints_left, reset_joints_right])
+        #curr_joints = env.get_obs()["joint_positions"]
+        #max_delta = (np.abs(curr_joints - reset_joints)).max()
+        #steps = min(int(max_delta / 0.01), 100)
 
-        for jnt in np.linspace(curr_joints, reset_joints, steps):
-            env.step(jnt)
+        #for jnt in np.linspace(curr_joints, reset_joints, steps):
+        #    env.step(jnt)
+    elif args.arm_to_use == "left":
+        if args.agent == "gello":
+            gello_port = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKROCJ-if00-port0"
+            agent_cfg = {
+                "_target_": "gello.agents.gello_agent.GelloAgent",
+                "port": gello_port,
+                "start_joints": args.start_joints,
+            }
+    elif args.arm_to_use == "right":
+        if args.agent == "gello":
+            gello_port = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKRM7P-if00-port0"
+            agent_cfg = {
+                "_target_": "gello.agents.gello_agent.GelloAgent",
+                "port": gello_port,
+                "start_joints": args.start_joints,
+            }
+
     else:
         if args.agent == "gello":
             gello_port = args.gello_port
