@@ -1,6 +1,7 @@
 import glob
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -10,6 +11,10 @@ from gello.env import RobotEnv
 from gello.robots.robot import PrintRobot
 from gello.utils.launch_utils import instantiate_from_dict
 from gello.zmq_core.robot_node import ZMQClientRobot
+from gello.data_utils.teleop_dataset_recorder import (
+    DatasetRecordingConfig,
+    TeleopDatasetController,
+)
 
 
 def print_color(*args, color=None, attrs=(), **kwargs):
@@ -37,6 +42,24 @@ class Args:
     data_dir: str = "~/bc_data"
     arm_to_use: str = "right" # "left", "right", "both"
     verbose: bool = False
+    enable_dataset_recorder: bool = False
+    dataset_name: Optional[str] = None
+    dataset_instruction: Optional[str] = None
+    dataset_root: str = "datasets"
+    dataset_enable_depth: bool = False
+    dataset_enable_audio: bool = False
+    dataset_enable_torque: bool = False
+    dataset_fps: float = 12.0
+    dataset_resolution: int = 224
+    dataset_audio_buffer_frames: int = 16
+    dataset_stream_address: Optional[str] = None
+    dataset_stream_timeout: float = 5.0
+    dataset_camera_device_id: Optional[str] = None
+    dataset_camera_flip: bool = False
+    dataset_audio_device_name: Optional[str] = None
+    dataset_audio_device_index: Optional[int] = None
+    dataset_audio_backend: str = "pyaudio"
+    dataset_audio_alsa_device: Optional[str] = None
 
     def __post_init__(self):
         if self.start_joints is not None:
@@ -251,13 +274,45 @@ def main(args):
 
     from gello.utils.control_utils import SaveInterface, run_control_loop
 
+    dataset_controller = None
+    if args.enable_dataset_recorder:
+        ds_config = DatasetRecordingConfig(
+            enabled=True,
+            dataset_name=args.dataset_name,
+            instruction=args.dataset_instruction,
+            root=Path(args.dataset_root).expanduser(),
+            enable_rgb=True,
+            enable_depth=args.dataset_enable_depth,
+            enable_audio=args.dataset_enable_audio,
+            enable_torque=args.dataset_enable_torque,
+            fps=args.dataset_fps,
+            resolution=args.dataset_resolution,
+            audio_sample_rate=48_000,
+            audio_buffer_frames=args.dataset_audio_buffer_frames,
+            stream_address=args.dataset_stream_address,
+            stream_timeout_s=args.dataset_stream_timeout,
+            realsense_device_id=args.dataset_camera_device_id,
+            realsense_flip=args.dataset_camera_flip,
+            audio_device_name=args.dataset_audio_device_name,
+            audio_device_index=args.dataset_audio_device_index,
+            audio_backend=args.dataset_audio_backend,
+            audio_alsa_device=args.dataset_audio_alsa_device,
+        )
+        dataset_controller = TeleopDatasetController(ds_config, args.arm_to_use)
+
     save_interface = None
-    if args.use_save_interface:
+    if args.use_save_interface and not args.enable_dataset_recorder:
         save_interface = SaveInterface(
             data_dir=args.data_dir, agent_name=args.agent, expand_user=True
         )
 
-    run_control_loop(env, agent, save_interface, use_colors=True)
+    run_control_loop(
+        env,
+        agent,
+        save_interface,
+        use_colors=True,
+        dataset_controller=dataset_controller,
+    )
 
 
 if __name__ == "__main__":

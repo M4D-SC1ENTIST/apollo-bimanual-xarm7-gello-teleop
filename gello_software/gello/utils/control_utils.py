@@ -138,6 +138,7 @@ def run_control_loop(
     save_interface: Optional[SaveInterface] = None,
     print_timing: bool = True,
     use_colors: bool = False,
+    dataset_controller: Optional[Any] = None,
 ) -> None:
     """Run the main control loop.
 
@@ -166,25 +167,30 @@ def run_control_loop(
     start_time = time.time()
     obs = env.get_obs()
 
-    while True:
-        if print_timing:
-            num = time.time() - start_time
-            message = f"\rTime passed: {round(num, 2)}          "
+    try:
+        while True:
+            if print_timing:
+                num = time.time() - start_time
+                message = f"\rTime passed: {round(num, 2)}          "
 
-            if colors_available:
-                print(
-                    colored(message, color="white", attrs=["bold"]), end="", flush=True
-                )
-            else:
-                print(message, end="", flush=True)
+                if colors_available:
+                    print(
+                        colored(message, color="white", attrs=["bold"]), end="", flush=True
+                    )
+                else:
+                    print(message, end="", flush=True)
 
-        action = agent.act(obs)
-        #print("action: ", action)
+            action = agent.act(obs)
 
-        # Handle save interface
-        if save_interface is not None:
-            result = save_interface.update(obs, action)
-            if result == "quit":
-                break
+            if dataset_controller is not None:
+                dataset_controller.update(obs, action)
 
-        obs = env.step(action)
+            if save_interface is not None:
+                result = save_interface.update(obs, action)
+                if result == "quit":
+                    break
+
+            obs = env.step(action)
+    finally:
+        if dataset_controller is not None:
+            dataset_controller.close()

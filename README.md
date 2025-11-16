@@ -68,6 +68,34 @@ Key viewer options (all optional):
 
 Omit `--enable-camera-viewer` if you only need arm teleoperation.
 
+### Record multimodal datasets
+
+Use the multimodal-lerobot recorder to log synchronized RGB/depth, proprioception, and optional audio/torque:
+
+```bash
+python launch_teleop.py \
+    --arm-to-use right \
+    --viewpoint-option coffee \
+    --enable-dataset-recorder \
+    --dataset-name coffee \
+    --dataset-instruction "put the coffee pod into the coffee maker" \
+    --dataset-enable-depth \
+    --dataset-enable-audio \
+    --dataset-enable-torque
+```
+
+Key details:
+
+- Recordings are stored under `datasets/<dataset_name>/episode_<idx>/`. This directory is git-ignored.
+- If `--dataset-name` is omitted, the recorder auto-creates `untitled_dataset_<n>` the first time you press `S`.
+- Press `S` (start/save) to begin logging an episode, `Q` to stop. Press `S` again to start the next episode; all episodes append to the same dataset.
+- `--dataset-instruction` populates both `tasks` and `instruction` fields in the metadata. Restart `launch_teleop.py` with the same dataset name but a different instruction to mix tasks within one dataset.
+- Depth, audio, and torque logging are optional (`--dataset-enable-depth`, `--dataset-enable-audio`, `--dataset-enable-torque`). RGB + joint state/action streams are always captured at 12 Hz, audio at 48 kHz mono.
+- For microphones plugged in via ALSA/PortAudio, point the recorder to the correct device using `--dataset-audio-device-name "RØDE NT-USB Mini"` (substring match) or `--dataset-audio-device-index <idx>`; you can also force a specific ALSA PCM via `--dataset-audio-alsa-device plughw:1,0`.
+- The recorder defaults to the PyAudio backend but can be forced (or will automatically fall back) to `arecord` by passing `--dataset-audio-backend arecord` if PortAudio has trouble configuring the device.
+- The dataset metadata lives in `datasets/<dataset_name>/meta/info.json` and follows the schema consumed by the provided `dataset_handler_for_training.py`.
+- The recorder consumes the RealSense viewer feed. `--enable-dataset-recorder` automatically launches the viewer with a ZeroMQ stream so you still get live perception while saving demonstrations.
+
 ## Troubleshoot
 - If during installing `multimodal-lerobot-dataset`, there is error on installing `pyaudio`, please run
     ```

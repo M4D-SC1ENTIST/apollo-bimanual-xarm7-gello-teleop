@@ -13,10 +13,11 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+import zmq
 
 from gello.cameras.realsense_camera import RealSenseCamera
 
@@ -42,6 +43,16 @@ class ViewerConfig:
     overlay_info: bool
     fullscreen: bool
     backend: str
+    stream_address: Optional[str] = None
+    stream_frequency: float = 12.0
+    stream_resolution: int = 224
+
+
+@dataclass
+class StreamConfig:
+    address: str
+    frequency: float
+    resolution: int
 
 
 class OpenCVDisplayBackend:
@@ -151,16 +162,28 @@ def _make_display_backend(config: ViewerConfig):
 class RealSenseViewer:
     """Continuously pulls RGB/depth frames and visualizes them."""
 
-    def __init__(self, config: ViewerConfig):
+    def __init__(self, config: ViewerConfig, stream_config: Optional[StreamConfig] = None):
         self.config = config
         self.camera = RealSenseCamera(device_id=config.device_id, flip=config.flip)
         self._shutdown = False
         self.backend = self._init_backend(config)
+        self.stream_config = stream_config
+        self._stream_ctx: Optional[zmq.Context] = None
+        self._stream_socket: Optional[zmq.Socket] = None
+        self._last_stream_time = 0.0
+        if stream_config is not None:
+            self._stream_ctx = zmq.Context()
+            self._stream_socket = self._stream_ctx.socket(zmq.PUB)
+            self._stream_socket.bind(stream_config.address)
 
     def close(self):
         if self.backend:
             self.backend.close()
         self.camera.stop()
+        if self._stream_socket is not None:
+            self._stream_socket.close(0)
+        if self._stream_ctx is not None:
+            self._stream_ctx.term()
 
     def _init_backend(self, config: ViewerConfig):
         try:
@@ -219,6 +242,36 @@ class RealSenseViewer:
             )
         return cv2.cvtColor(depth_color_bgr, cv2.COLOR_BGR2RGB)
 
+    def _stream_frame(self, rgb_frame: np.ndarray, depth_frame: Optional[np.ndarray]):
+        if self._stream_socket is None or self.stream_config is None:
+            return
+        now = time.time()
+        interval = 1.0 / max(self.stream_config.frequency, 1.0)
+        if now - self._last_stream_time < interval:
+            return
+        self._last_stream_time = now
+
+        resolution = self.stream_config.resolution
+        rgb_small = cv2.resize(
+            rgb_frame, (resolution, resolution), interpolation=cv2.INTER_AREA
+        )
+        depth_small = None
+        if depth_frame is not None:
+            depth_small = cv2.resize(
+                depth_frame.squeeze(-1),
+                (resolution, resolution),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.uint16)
+        payload = {
+            "timestamp": now,
+            "rgb": rgb_small,
+            "depth": depth_small,
+        }
+        try:
+            self._stream_socket.send_pyobj(payload, flags=zmq.NOBLOCK)
+        except zmq.ZMQError:
+            pass
+
     def run(self):
         last_time = time.time()
         frames_rendered = 0
@@ -249,6 +302,7 @@ class RealSenseViewer:
                     )
 
                 rgb_display = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGR2RGB)
+                self._stream_frame(rgb_display, depth)
 
                 depth_display = None
                 if self.config.show_depth:
@@ -261,7 +315,7 @@ class RealSenseViewer:
             self.close()
 
 
-def parse_args() -> ViewerConfig:
+def parse_args() -> Tuple[ViewerConfig, Optional[StreamConfig]]:
     parser = argparse.ArgumentParser(
         description="Visualize RGB + depth streams from an Intel RealSense D435i."
     )
@@ -318,6 +372,30 @@ def parse_args() -> ViewerConfig:
         default="opencv",
         help="GUI backend for visualization (default: opencv).",
     )
+    parser.add_argument(
+        "--stream-port",
+        type=int,
+        default=None,
+        help="Optional port to publish downsampled frames over ZMQ.",
+    )
+    parser.add_argument(
+        "--stream-address",
+        type=str,
+        default="127.0.0.1",
+        help="Interface for ZMQ streaming (default: 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--stream-frequency",
+        type=float,
+        default=12.0,
+        help="Max streaming FPS.",
+    )
+    parser.add_argument(
+        "--stream-resolution",
+        type=int,
+        default=224,
+        help="Spatial resolution for streamed RGB/depth frames.",
+    )
 
     args = parser.parse_args()
     config = ViewerConfig(
@@ -332,13 +410,24 @@ def parse_args() -> ViewerConfig:
         overlay_info=not args.no_overlay,
         fullscreen=args.fullscreen,
         backend=args.viewer_backend,
+        stream_address=None,
+        stream_frequency=args.stream_frequency,
+        stream_resolution=args.stream_resolution,
     )
-    return config
+    stream_cfg = None
+    if args.stream_port is not None:
+        address = f"tcp://{args.stream_address}:{args.stream_port}"
+        stream_cfg = StreamConfig(
+            address=address,
+            frequency=args.stream_frequency,
+            resolution=args.stream_resolution,
+        )
+    return config, stream_cfg
 
 
 def main():
-    config = parse_args()
-    viewer = RealSenseViewer(config)
+    config, stream_cfg = parse_args()
+    viewer = RealSenseViewer(config, stream_cfg)
 
     def _signal_handler(signum, _frame):
         viewer.close()

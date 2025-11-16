@@ -4,6 +4,7 @@ omegaconf==2.3.0
 Pillow
 pin==3.7.0
 pygame
+pyarrow
 pyspacemouse
 PyQt6
 pyquaternion

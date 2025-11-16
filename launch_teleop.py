@@ -13,6 +13,7 @@ def _build_run_env_command(
     python_executable: str,
     arm_to_use: str,
     extra_args: List[str],
+    dataset_args: List[str],
 ) -> Tuple[List[str], Path]:
     """Create the command that launches the teleoperation environment."""
     gello_root = Path(__file__).resolve().parent / "gello_software"
@@ -26,6 +27,7 @@ def _build_run_env_command(
         arm_to_use,
     ]
     cmd.extend(extra_args)
+    cmd.extend(dataset_args)
     return cmd, gello_root
 
 
@@ -54,6 +56,10 @@ def _build_realsense_viewer_command(
     show_depth: bool,
     fullscreen: bool,
     backend: str,
+    stream_port: Optional[int],
+    stream_address: str,
+    stream_frequency: float,
+    stream_resolution: int,
 ) -> Tuple[List[str], Path]:
     """Create the command that launches the RealSense perception viewer."""
     gello_root = Path(__file__).resolve().parent / "gello_software"
@@ -73,6 +79,19 @@ def _build_realsense_viewer_command(
         cmd.append("--fullscreen")
     if backend != "opencv":
         cmd.extend(["--viewer-backend", backend])
+    if stream_port is not None:
+        cmd.extend(
+            [
+                "--stream-port",
+                str(stream_port),
+                "--stream-address",
+                stream_address,
+                "--stream-frequency",
+                str(stream_frequency),
+                "--stream-resolution",
+                str(stream_resolution),
+            ]
+        )
     return cmd, gello_root
 
 
@@ -166,6 +185,116 @@ def main() -> None:
         default="pygame",
         help="Visualization backend to use for the RealSense viewer.",
     )
+    parser.add_argument(
+        "--viewer-stream-port",
+        type=int,
+        default=5557,
+        help="Port used to stream RealSense frames to the dataset recorder.",
+    )
+    parser.add_argument(
+        "--viewer-stream-address",
+        type=str,
+        default="127.0.0.1",
+        help="Interface used by the viewer stream publisher.",
+    )
+    parser.add_argument(
+        "--viewer-stream-frequency",
+        type=float,
+        default=12.0,
+        help="Max FPS for viewer streaming.",
+    )
+    parser.add_argument(
+        "--viewer-stream-resolution",
+        type=int,
+        default=224,
+        help="Spatial resolution for streamed frames.",
+    )
+    parser.add_argument(
+        "--enable-dataset-recorder",
+        action="store_true",
+        help="Enable keyboard-controlled dataset recording via multimodal-lerobot.",
+    )
+    parser.add_argument(
+        "--dataset-name",
+        type=str,
+        default=None,
+        help="Name of the dataset under datasets/. (optional, auto-named if omitted)",
+    )
+    parser.add_argument(
+        "--dataset-instruction",
+        type=str,
+        default=None,
+        help="Instruction/task description stored with each episode.",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        default=str((Path(__file__).resolve().parent / "datasets").resolve()),
+        help="Root directory for saved datasets.",
+    )
+    parser.add_argument(
+        "--dataset-enable-depth",
+        action="store_true",
+        help="Record aligned depth images.",
+    )
+    parser.add_argument(
+        "--dataset-enable-audio",
+        action="store_true",
+        help="Record microphone audio at 48 kHz.",
+    )
+    parser.add_argument(
+        "--dataset-enable-torque",
+        action="store_true",
+        help="Record joint torque observations.",
+    )
+    parser.add_argument(
+        "--dataset-fps",
+        type=float,
+        default=12.0,
+        help="Sampling rate (Hz) for robot state/action logging.",
+    )
+    parser.add_argument(
+        "--dataset-resolution",
+        type=int,
+        default=224,
+        help="Spatial resolution for recorded RGB/depth frames.",
+    )
+    parser.add_argument(
+        "--dataset-audio-buffer-frames",
+        type=int,
+        default=16,
+        help="Number of past audio frames referenced in metadata.",
+    )
+    parser.add_argument(
+        "--dataset-stream-timeout",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for viewer stream before falling back to direct capture.",
+    )
+    parser.add_argument(
+        "--dataset-audio-device-name",
+        type=str,
+        default="RØDE NT-USB Mini",
+        help="Substring of the desired microphone name (e.g., 'RØDE NT-USB Mini').",
+    )
+    parser.add_argument(
+        "--dataset-audio-device-index",
+        type=int,
+        default=None,
+        help="Explicit PortAudio device index to use for microphone capture.",
+    )
+    parser.add_argument(
+        "--dataset-audio-backend",
+        choices=["pyaudio", "arecord"],
+        default="pyaudio",
+        help="Audio backend to use for microphone capture (default: pyaudio).",
+    )
+    parser.add_argument(
+        "--dataset-audio-alsa-device",
+        type=str,
+        default=None,
+        help="Explicit ALSA device string for arecord fallback (e.g., plughw:1,0).",
+    )
     args, forward_args = parser.parse_known_args()
     
     print(f"Viewpoint option: {args.viewpoint_option}")
@@ -181,17 +310,61 @@ def main() -> None:
         print("Invalid viewpoint option")
         return
 
+    dataset_args: List[str] = []
+    repo_root = Path(__file__).resolve().parent
+    dataset_stream_address = None
+    if args.enable_dataset_recorder:
+        dataset_args.append("--enable-dataset-recorder")
+        dataset_root_path = Path(args.dataset_root).expanduser()
+        if not dataset_root_path.is_absolute():
+            dataset_root_path = (repo_root / dataset_root_path).resolve()
+        dataset_args.extend(["--dataset-root", str(dataset_root_path)])
+        dataset_args.extend(["--dataset-fps", str(args.dataset_fps)])
+        dataset_args.extend(["--dataset-resolution", str(args.dataset_resolution)])
+        dataset_args.extend(
+            ["--dataset-audio-buffer-frames", str(args.dataset_audio_buffer_frames)]
+        )
+        dataset_args.extend(["--dataset-stream-timeout", str(args.dataset_stream_timeout)])
+        if args.dataset_name:
+            dataset_args.extend(["--dataset-name", args.dataset_name])
+        if args.dataset_instruction:
+            dataset_args.extend(["--dataset-instruction", args.dataset_instruction])
+        if args.dataset_enable_depth:
+            dataset_args.append("--dataset-enable-depth")
+        if args.dataset_enable_audio:
+            dataset_args.append("--dataset-enable-audio")
+        if args.dataset_enable_torque:
+            dataset_args.append("--dataset-enable-torque")
+        if args.realsense_device_id:
+            dataset_args.extend(["--dataset-camera-device-id", args.realsense_device_id])
+        if args.realsense_flip:
+            dataset_args.append("--dataset-camera-flip")
+        if args.dataset_audio_device_name:
+            dataset_args.extend(["--dataset-audio-device-name", args.dataset_audio_device_name])
+        if args.dataset_audio_device_index is not None:
+            dataset_args.extend(["--dataset-audio-device-index", str(args.dataset_audio_device_index)])
+        if args.dataset_audio_backend != "pyaudio":
+            dataset_args.extend(["--dataset-audio-backend", args.dataset_audio_backend])
+        if args.dataset_audio_alsa_device:
+            dataset_args.extend(["--dataset-audio-alsa-device", args.dataset_audio_alsa_device])
+        dataset_stream_address = f"tcp://{args.viewer_stream_address}:{args.viewer_stream_port}"
+        dataset_args.extend(["--dataset-stream-address", dataset_stream_address])
+
     commands: Dict[str, Tuple[List[str], Path]] = {}
     commands["run_env"] = _build_run_env_command(
         python_executable=args.python_executable,
         arm_to_use=args.arm_to_use,
         extra_args=forward_args,
+        dataset_args=dataset_args,
     )
     commands["xarm"] = _build_xarm_command(
         python_executable=args.python_executable,
         arm_to_use=args.arm_to_use,
         viewpoint_arm_start_joints_state=viewpoint_arm_start_joints_state,
     )
+    if args.enable_dataset_recorder and not args.enable_camera_viewer:
+        args.enable_camera_viewer = True
+
     if args.enable_camera_viewer:
         commands["realsense_viewer"] = _build_realsense_viewer_command(
             python_executable=args.python_executable,
@@ -202,6 +375,10 @@ def main() -> None:
             show_depth=not args.viewer_hide_depth,
             fullscreen=args.viewer_fullscreen,
             backend=args.viewer_backend,
+            stream_port=args.viewer_stream_port if args.enable_dataset_recorder else None,
+            stream_address=args.viewer_stream_address,
+            stream_frequency=args.viewer_stream_frequency,
+            stream_resolution=args.viewer_stream_resolution,
         )
 
     processes: Dict[str, subprocess.Popen] = {}
