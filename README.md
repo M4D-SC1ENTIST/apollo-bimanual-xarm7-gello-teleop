@@ -27,16 +27,46 @@
 
 ## Usage
 
-- Run teleop
-    ```
-    python launch_teleop.py --arm-to-use <arm_to_use>
-    ```
-    for example
-    ```
-    python launch_teleop.py --arm-to-use left --viewpoint-option none
-    python launch_teleop.py --arm-to-use right --viewpoint-option none
-    python launch_teleop.py --arm-to-use both --viewpoint-option coffee
-    ```
+### Launch teleop control
+
+Run the orchestrator script to bring up the Gello teleop agent and the xArm7 server:
+
+```bash
+python launch_teleop.py --arm-to-use <left|right|both> --viewpoint-option <coffee|active|none>
+```
+
+Example invocations:
+
+```bash
+python launch_teleop.py --arm-to-use left --viewpoint-option none
+python launch_teleop.py --arm-to-use right --viewpoint-option none
+python launch_teleop.py --arm-to-use both --viewpoint-option coffee
+```
+
+### Add RealSense perception viewer
+
+To visualize the D435i RGB/depth feed while teleoperating, enable the viewer process:
+
+```bash
+python launch_teleop.py \
+    --arm-to-use right \
+    --viewpoint-option none \
+    --enable-camera-viewer \
+    --realsense-device-id <SERIAL> \
+    --viewer-backend pygame  # default backend
+```
+
+Key viewer options (all optional):
+
+- `--realsense-device-id`: serial number if multiple cameras are connected.
+- `--realsense-depth-scale`: meters per depth unit (default `0.001`).
+- `--realsense-max-depth`: clamp depth visualization range (meters).
+- `--realsense-flip`: rotate the stream 180° if the camera is mounted upside-down.
+- `--viewer-hide-depth`: show RGB only.
+- `--viewer-fullscreen`: fullscreen display for control rooms.
+- `--viewer-backend`: `pygame` (default) or `opencv` if GTK/Qt is available.
+
+Omit `--enable-camera-viewer` if you only need arm teleoperation.
 
 ## Troubleshoot
 - If during installing `multimodal-lerobot-dataset`, there is error on installing `pyaudio`, please run
