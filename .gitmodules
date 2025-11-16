@@ -1,0 +1,3 @@
+[submodule "multimodal-lerobot-dataset"]
+	path = multimodal-lerobot-dataset
+	url = https://github.com/M4D-SC1ENTIST/multimodal-lerobot-dataset
