@@ -81,8 +81,7 @@ python launch_teleop.py \
     --dataset-instruction "put the coffee pod into the coffee maker" \
     --dataset-enable-depth \
     --dataset-enable-audio \
-    --dataset-enable-torque
-```
+    --dataset-enable-torque ```
 
 Key details:
 
@@ -92,7 +91,7 @@ Key details:
 - `--dataset-instruction` populates both `tasks` and `instruction` fields in the metadata. Restart `launch_teleop.py` with the same dataset name but a different instruction to mix tasks within one dataset.
 - Depth, audio, and torque logging are optional (`--dataset-enable-depth`, `--dataset-enable-audio`, `--dataset-enable-torque`). RGB + joint state/action streams are always captured at 12 Hz, audio at 48 kHz mono.
 - For microphones plugged in via ALSA/PortAudio, point the recorder to the correct device using `--dataset-audio-device-name "RØDE NT-USB Mini"` (substring match) or `--dataset-audio-device-index <idx>`; you can also force a specific ALSA PCM via `--dataset-audio-alsa-device plughw:1,0`.
-- The recorder defaults to PyAudio but can fall back to ALSA (`--dataset-audio-backend alsaaudio`) or `arecord` if PortAudio refuses to start. Use `--dataset-audio-alsa-device plughw:1,0` to pin the ALSA PCM when using those backends.
+- The recorder defaults to the ALSA backend for maximum reliability, but you can force PyAudio or `arecord` via `--dataset-audio-backend`. Use `--dataset-audio-alsa-device plughw:1,0` to pin the ALSA PCM when using ALSA/arecord backends.
 - The dataset metadata lives in `datasets/<dataset_name>/meta/info.json` and follows the schema consumed by the provided `dataset_handler_for_training.py`.
 - The recorder consumes the RealSense viewer feed. `--enable-dataset-recorder` automatically launches the viewer with a ZeroMQ stream so you still get live perception while saving demonstrations.
 

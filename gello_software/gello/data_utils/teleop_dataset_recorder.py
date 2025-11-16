@@ -60,7 +60,7 @@ class DatasetRecordingConfig:
     realsense_flip: bool = False
     audio_device_name: Optional[str] = None
     audio_device_index: Optional[int] = None
-    audio_backend: str = "pyaudio"
+    audio_backend: str = "alsaaudio"
     audio_alsa_device: Optional[str] = None
 
 
@@ -465,8 +465,7 @@ class AudioCaptureManager:
                     needed -= len(chunk)
                 else:
                     collected.append(chunk[:needed])
-                    remaining = chunk[needed:]
-                    self._buffer.appendleft(remaining)
+                    self._buffer.appendleft(chunk[needed:])
                     needed = 0
 
         if needed > 0:
@@ -484,6 +483,10 @@ class AudioCaptureManager:
         self._recorder.stop()
         with self._lock:
             self._buffer.clear()
+
+    @property
+    def running(self) -> bool:
+        return self._running
 
 
 def _list_audio_devices() -> List[Dict[str, Any]]:
@@ -883,6 +886,9 @@ class TeleopDatasetController:
         self.audio_device_index: Optional[int] = None
         self.audio_device_name: Optional[str] = None
         self.audio_alsa_device: Optional[str] = config.audio_alsa_device
+        self._audio_retry_delay = 0.3
+        self._audio_max_retries = 3
+        self._audio_samples_per_frame = int(round(config.audio_sample_rate / max(config.fps, 1.0)))
         if config.enable_audio:
             idx, name, inferred = _resolve_audio_device(
                 config.audio_device_index,
@@ -892,7 +898,6 @@ class TeleopDatasetController:
             self.audio_device_name = name
             if self.audio_alsa_device is None:
                 self.audio_alsa_device = inferred
-            self._initialize_audio_manager(self.audio_backend)
         self.keyboard = KBReset() if config.enabled else None
 
         self.active_dataset_name: Optional[str] = (
@@ -917,7 +922,8 @@ class TeleopDatasetController:
             now = time.time()
             if now - self.last_log_time >= self.interval:
                 self.last_log_time = now
-                self._log_step(obs, action, now)
+                audio_chunk = self._next_audio_chunk()
+                self._log_step(obs, action, now, audio_chunk)
         elif state == "normal" and self.recording:
             self._stop_episode()
 
@@ -938,42 +944,16 @@ class TeleopDatasetController:
         instruction = self.config.instruction or ""
         self.current_writer = self.recorder.start_episode(dataset_name, instruction)
         self.last_log_time = 0.0
-        try:
-            self._ensure_audio_stream()
-        except Exception:
-            self.current_writer = None
-            raise
         self.recording = True
         print(f"[dataset] Started new episode in dataset '{dataset_name}'.")
 
-    def _ensure_audio_stream(self):
-        if self.audio_manager is None:
-            return
-        try:
-            self.audio_manager.start()
-        except Exception as exc:
-            if self.audio_backend == "pyaudio" and self.audio_alsa_device:
-                try:
-                    self.audio_backend = "alsaaudio"
-                    print(
-                        f"[dataset] PyAudio failed to start ({exc}). "
-                        "Falling back to ALSA backend."
-                    )
-                    self._initialize_audio_manager("alsaaudio")
-                    self.audio_manager.start()
-                    return
-                except Exception as alsa_exc:
-                    print(f"[dataset] ALSA backend failed: {alsa_exc}")
-                    if shutil.which("arecord") is not None:
-                        print("[dataset] Falling back to arecord backend.")
-                        self.audio_backend = "arecord"
-                        self._initialize_audio_manager("arecord")
-                        self.audio_manager.start()
-                        return
-                    raise
-            raise
-
-    def _log_step(self, obs: Dict[str, Any], action: np.ndarray, timestamp: float):
+    def _log_step(
+        self,
+        obs: Dict[str, Any],
+        action: np.ndarray,
+        timestamp: float,
+        audio_chunk: Optional[torch.Tensor],
+    ):
         if self.current_writer is None:
             return
         joint_positions = obs.get("joint_positions")
@@ -1005,10 +985,6 @@ class TeleopDatasetController:
                 if depth is not None:
                     depth = depth.astype(np.uint16)
 
-        audio_chunk = None
-        if self.audio_manager:
-            audio_chunk = self.audio_manager.consume()
-
         self.current_writer.log_step(
             timestamp=timestamp,
             state=joint_positions.tolist(),
@@ -1025,8 +1001,6 @@ class TeleopDatasetController:
         self.current_writer.close()
         if self.active_dataset_name is not None:
             self.recorder.finalize_episode(self.active_dataset_name, self.current_writer)
-        if self.audio_manager:
-            self.audio_manager.stop()
         print(
             f"[dataset] Episode finished with {self.current_writer.frame_count} frames "
             f"in dataset '{self.active_dataset_name}'."
@@ -1045,9 +1019,64 @@ class TeleopDatasetController:
             self.audio_manager.stop()
         self.audio_manager = None
 
+    def _backend_candidates(self) -> List[str]:
+        order = []
+        preferred = self.config.audio_backend or "alsaaudio"
+        for backend in (preferred, "alsaaudio", "arecord", "pyaudio"):
+            if backend not in order:
+                order.append(backend)
+        return order
+
+    def _start_audio_pipeline(self):
+        if not self.config.enable_audio:
+            return
+        if self.audio_manager is not None:
+            try:
+                self.audio_manager.stop()
+            except Exception:
+                pass
+            self.audio_manager = None
+        last_exc: Optional[Exception] = None
+        for backend in self._backend_candidates():
+            for attempt in range(1, self._audio_max_retries + 1):
+                try:
+                    self._initialize_audio_manager(backend)
+                    self.audio_manager.start()
+                    self.audio_backend = backend
+                    return
+                except Exception as exc:
+                    last_exc = exc
+                    print(
+                        f"[dataset] {backend} backend attempt {attempt}/"
+                        f"{self._audio_max_retries} failed: {exc}"
+                    )
+                    if self.audio_manager is not None:
+                        try:
+                            self.audio_manager.stop()
+                        except Exception:
+                            pass
+                        self.audio_manager = None
+                    time.sleep(self._audio_retry_delay)
+        raise RuntimeError(
+            f"All audio backends failed to start ({last_exc}). "
+            "Check microphone connection and ALSA configuration."
+        )
+
+    def _next_audio_chunk(self) -> torch.Tensor:
+        if not self.config.enable_audio:
+            return torch.zeros(0)
+        chunk = self._consume_audio_chunk()
+        if chunk is None:
+            return torch.zeros(self._audio_samples_per_frame)
+        return chunk
+
+    def _ensure_audio_stream(self):
+        if not self.config.enable_audio:
+            return
+        if self.audio_manager is None or not self.audio_manager.running:
+            self._start_audio_pipeline()
+
     def _initialize_audio_manager(self, backend: str):
-        self.config.audio_backend = backend
-        self.audio_backend = backend
         self.audio_manager = AudioCaptureManager(
             self.config.audio_sample_rate,
             self.config.fps,
@@ -1055,6 +1084,8 @@ class TeleopDatasetController:
             device_index=self.audio_device_index,
             alsa_device=self.audio_alsa_device,
         )
+        self.config.audio_backend = backend
+        self.audio_backend = backend
         if self.audio_device_name:
             device_desc = (
                 f"[{self.audio_device_index}] {self.audio_device_name}"
@@ -1063,8 +1094,32 @@ class TeleopDatasetController:
             )
             backend_desc = (
                 f"{device_desc}: {self.audio_alsa_device}"
-                if backend == "arecord" and self.audio_alsa_device
+                if backend in {"alsaaudio", "arecord"} and self.audio_alsa_device
                 else device_desc
             )
             print(f"[dataset] Using audio device {backend_desc}")
+
+    def _start_audio_drain(self):
+        self._ensure_audio_stream()
+
+    def _stop_audio_drain(self):
+        if self.audio_manager:
+            self.audio_manager.stop()
+            self.audio_manager = None
+    def _consume_audio_chunk(self) -> Optional[torch.Tensor]:
+        if not self.config.enable_audio:
+            return None
+        self._ensure_audio_stream()
+        if self.audio_manager is None:
+            return None
+        try:
+            return self.audio_manager.consume()
+        except Exception as exc:
+            print(f"[dataset] Audio recorder error: {exc}")
+            try:
+                self.audio_manager.stop()
+            except Exception:
+                pass
+            self.audio_manager = None
+            return None
 
