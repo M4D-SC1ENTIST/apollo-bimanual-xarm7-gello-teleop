@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 
 def _build_run_env_command(
@@ -286,8 +289,8 @@ def main() -> None:
     parser.add_argument(
         "--dataset-audio-backend",
         choices=["pyaudio", "alsaaudio", "arecord"],
-        default="alsaaudio",
-        help="Audio backend to use for microphone capture (default: alsaaudio).",
+        default="pyaudio",
+        help="Audio backend to use for microphone capture (default: pyaudio).",
     )
     parser.add_argument(
         "--dataset-audio-alsa-device",

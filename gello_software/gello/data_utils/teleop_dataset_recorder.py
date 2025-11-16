@@ -60,7 +60,7 @@ class DatasetRecordingConfig:
     realsense_flip: bool = False
     audio_device_name: Optional[str] = None
     audio_device_index: Optional[int] = None
-    audio_backend: str = "alsaaudio"
+    audio_backend: str = "pyaudio"
     audio_alsa_device: Optional[str] = None
 
 
@@ -375,6 +375,16 @@ class ArecordRecorder:
             self.stderr = None
 
 
+@dataclass
+class _BufferedAudioChunk:
+    samples: np.ndarray
+    start_time: float
+
+    @property
+    def sample_count(self) -> int:
+        return int(self.samples.shape[0])
+
+
 class AudioCaptureManager:
     """Continuously captures microphone audio and provides fixed-size windows per frame."""
 
@@ -392,11 +402,14 @@ class AudioCaptureManager:
         self._backend = backend
         self._device_index = device_index
         self._alsa_device = alsa_device
-        self._buffer: deque[np.ndarray] = deque()
+        self._buffer: deque[_BufferedAudioChunk] = deque()
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._chunk_size = max(self._samples_per_frame, 1024)
+        self._buffered_samples = 0
+        self._max_buffer_samples = self._samples_per_frame * 10
+        self._next_sample_time: Optional[float] = None
         self._recorder = self._build_recorder()
 
     def _build_recorder(self):
@@ -445,34 +458,66 @@ class AudioCaptureManager:
     def _loop(self):
         while self._running:
             try:
-                chunk = self._recorder.read_chunk(self._chunk_size)
+                chunk_tensor = self._recorder.read_chunk(self._chunk_size)
             except Exception as exc:
                 print(f"[dataset] Audio recorder error: {exc}")
                 self._running = False
                 break
-            data = chunk.squeeze(-1).numpy()
+            data = chunk_tensor.squeeze(-1).detach().cpu().numpy().astype(np.float32)
+            end_time = time.time()
+            duration = data.shape[0] / max(self._sample_rate, 1)
+            start_time = end_time - duration
             with self._lock:
-                self._buffer.append(data)
+                self._buffer.append(_BufferedAudioChunk(samples=data, start_time=start_time))
+                self._buffered_samples += data.shape[0]
+                if self._next_sample_time is None:
+                    self._next_sample_time = start_time
+                while (
+                    self._buffered_samples > self._max_buffer_samples and len(self._buffer) > 1
+                ):
+                    dropped = self._buffer.popleft()
+                    self._buffered_samples -= dropped.sample_count
+                    if self._next_sample_time is not None:
+                        drop_duration = dropped.sample_count / max(self._sample_rate, 1)
+                        self._next_sample_time = max(
+                            self._next_sample_time, dropped.start_time + drop_duration
+                        )
 
-    def consume(self) -> torch.Tensor:
-        needed = self._samples_per_frame
+    def consume(self, num_samples: Optional[int] = None) -> Tuple[torch.Tensor, float, float]:
+        """Return (waveform, start_time, end_time) for the requested sample count."""
+        target = num_samples if num_samples is not None else self._samples_per_frame
+        target = max(0, int(target))
         collected: List[np.ndarray] = []
+        start_time: Optional[float] = None
         with self._lock:
+            needed = target
             while needed > 0 and self._buffer:
-                chunk = self._buffer.popleft()
-                if len(chunk) <= needed:
-                    collected.append(chunk)
-                    needed -= len(chunk)
+                chunk = self._buffer[0]
+                take = min(chunk.sample_count, needed)
+                if start_time is None:
+                    start_time = chunk.start_time
+                collected.append(chunk.samples[:take])
+                consumed_duration = take / max(self._sample_rate, 1)
+                chunk.samples = chunk.samples[take:]
+                chunk.start_time += consumed_duration
+                if chunk.sample_count == 0:
+                    self._buffer.popleft()
                 else:
-                    collected.append(chunk[:needed])
-                    self._buffer.appendleft(chunk[needed:])
-                    needed = 0
-
-        if needed > 0:
-            collected.append(np.zeros(needed, dtype=np.float32))
-
-        data = np.concatenate(collected).astype(np.float32)
-        return torch.from_numpy(data)
+                    self._buffer[0] = chunk
+                self._buffered_samples -= take
+                needed -= take
+            if start_time is None:
+                start_time = self._next_sample_time or time.time()
+            total = np.concatenate(collected) if collected else np.zeros(0, dtype=np.float32)
+            if total.shape[0] < target:
+                pad = np.zeros(target - total.shape[0], dtype=np.float32)
+                if total.size:
+                    total = np.concatenate([total, pad])
+                else:
+                    total = pad
+            end_time = start_time + (total.shape[0] / max(self._sample_rate, 1))
+            self._next_sample_time = end_time
+        return torch.from_numpy(total.copy()), start_time, end_time
 
     def stop(self):
         if not self._running:
@@ -883,6 +928,9 @@ class TeleopDatasetController:
         )
         self.audio_manager: Optional[AudioCaptureManager] = None
         self.audio_backend = config.audio_backend
+        self._audio_reference_time: Optional[float] = None
+        self._audio_samples_written = 0
+        self._last_frame_timestamp: Optional[float] = None
         self.audio_device_index: Optional[int] = None
         self.audio_device_name: Optional[str] = None
         self.audio_alsa_device: Optional[str] = config.audio_alsa_device
@@ -919,11 +967,19 @@ class TeleopDatasetController:
         if state == "start":
             self._start_episode()
         elif state == "save" and self.recording:
-            now = time.time()
-            if now - self.last_log_time >= self.interval:
-                self.last_log_time = now
-                audio_chunk = self._next_audio_chunk()
-                self._log_step(obs, action, now, audio_chunk)
+            loop_now = time.time()
+            if loop_now - self.last_log_time >= self.interval:
+                frame_payload = self.camera_source.latest() if self.camera_source else None
+                frame_timestamp = loop_now
+                if (
+                    self._last_frame_timestamp is not None
+                    and frame_timestamp <= self._last_frame_timestamp
+                ):
+                    frame_timestamp = self._last_frame_timestamp + 1e-6
+                self._last_frame_timestamp = frame_timestamp
+                audio_chunk = self._next_audio_chunk(frame_timestamp)
+                self._log_step(obs, action, frame_timestamp, frame_payload, audio_chunk)
+                self.last_log_time = loop_now
         elif state == "normal" and self.recording:
             self._stop_episode()
 
@@ -945,6 +1001,9 @@ class TeleopDatasetController:
         self.current_writer = self.recorder.start_episode(dataset_name, instruction)
         self.last_log_time = 0.0
         self.recording = True
+        self._audio_reference_time = None
+        self._audio_samples_written = 0
+        self._last_frame_timestamp = None
         print(f"[dataset] Started new episode in dataset '{dataset_name}'.")
 
     def _log_step(
@@ -952,6 +1011,7 @@ class TeleopDatasetController:
         obs: Dict[str, Any],
         action: np.ndarray,
         timestamp: float,
+        frame_payload: Optional[Tuple[float, np.ndarray, Optional[np.ndarray]]],
         audio_chunk: Optional[torch.Tensor],
     ):
         if self.current_writer is None:
@@ -973,17 +1033,15 @@ class TeleopDatasetController:
 
         rgb = None
         depth = None
-        if self.camera_source is not None:
-            frame = self.camera_source.latest()
-            if frame is None and not self._warned_camera:
-                print("[dataset] Waiting for RealSense frames...")
-                self._warned_camera = True
-            elif frame is not None:
-                _, rgb, depth = frame
-                if rgb is not None:
-                    rgb = np.asarray(rgb, dtype=np.uint8)
-                if depth is not None:
-                    depth = depth.astype(np.uint16)
+        if frame_payload is None and self.camera_source is not None and not self._warned_camera:
+            print("[dataset] Waiting for RealSense frames...")
+            self._warned_camera = True
+        elif frame_payload is not None:
+            _, rgb, depth = frame_payload
+            if rgb is not None:
+                rgb = np.asarray(rgb, dtype=np.uint8)
+            if depth is not None:
+                depth = depth.astype(np.uint16)
 
         self.current_writer.log_step(
             timestamp=timestamp,
@@ -1009,6 +1067,9 @@ class TeleopDatasetController:
         self.recording = False
         self._warned_camera = False
         self._warned_torque = False
+        self._audio_reference_time = None
+        self._audio_samples_written = 0
+        self._last_frame_timestamp = None
 
     def close(self):
         if self.recording:
@@ -1062,12 +1123,55 @@ class TeleopDatasetController:
             "Check microphone connection and ALSA configuration."
         )
 
-    def _next_audio_chunk(self) -> torch.Tensor:
+    def _next_audio_chunk(self, frame_timestamp: float) -> torch.Tensor:
         if not self.config.enable_audio:
             return torch.zeros(0)
-        chunk = self._consume_audio_chunk()
-        if chunk is None:
-            return torch.zeros(self._audio_samples_per_frame)
+        sr = self.config.audio_sample_rate
+        target_len = self._audio_samples_per_frame
+        chunk_info = self._consume_audio_chunk(target_len)
+        if chunk_info is None:
+            chunk = torch.zeros(target_len, dtype=torch.float32)
+            chunk_len = target_len
+        else:
+            chunk, _, _ = chunk_info
+            chunk_len = int(chunk.numel())
+
+        if chunk_len == 0:
+            chunk = torch.zeros(target_len, dtype=torch.float32)
+            chunk_len = target_len
+
+        if self._audio_reference_time is None:
+            chunk_duration = chunk_len / max(sr, 1)
+            self._audio_reference_time = frame_timestamp - chunk_duration
+            self._audio_samples_written = 0
+
+        ideal_end = int(round((frame_timestamp - self._audio_reference_time) * sr))
+        target_total = max(target_len, ideal_end - self._audio_samples_written)
+        max_total = target_len * 4
+        target_total = min(max_total, target_total)
+
+        while chunk.numel() < target_total:
+            extra = self._consume_audio_chunk(target_total - chunk.numel())
+            if extra is None:
+                pad = torch.zeros(target_total - chunk.numel(), dtype=chunk.dtype)
+                chunk = torch.cat([chunk, pad], dim=0)
+                break
+            chunk = torch.cat([chunk, extra[0]], dim=0)
+
+        if chunk.numel() > target_total:
+            trim = chunk.numel() - target_total
+            chunk = chunk[trim:]
+            self._audio_reference_time += trim / max(sr, 1)
+
+        if chunk.numel() > target_len:
+            trim = chunk.numel() - target_len
+            chunk = chunk[trim:]
+            self._audio_reference_time += trim / max(sr, 1)
+        elif chunk.numel() < target_len:
+            pad = torch.zeros(target_len - chunk.numel(), dtype=chunk.dtype)
+            chunk = torch.cat([chunk, pad], dim=0)
+
+        self._audio_samples_written += chunk.numel()
         return chunk
 
     def _ensure_audio_stream(self):
@@ -1106,14 +1210,15 @@ class TeleopDatasetController:
         if self.audio_manager:
             self.audio_manager.stop()
             self.audio_manager = None
-    def _consume_audio_chunk(self) -> Optional[torch.Tensor]:
-        if not self.config.enable_audio:
+
+    def _consume_audio_chunk(self, num_samples: int) -> Optional[Tuple[torch.Tensor, float, float]]:
+        if not self.config.enable_audio or num_samples <= 0:
             return None
         self._ensure_audio_stream()
         if self.audio_manager is None:
             return None
         try:
-            return self.audio_manager.consume()
+            return self.audio_manager.consume(num_samples)
         except Exception as exc:
             print(f"[dataset] Audio recorder error: {exc}")
             try:
