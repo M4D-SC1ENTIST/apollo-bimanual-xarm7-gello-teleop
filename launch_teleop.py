@@ -285,7 +285,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--dataset-audio-backend",
-        choices=["pyaudio", "arecord"],
+        choices=["pyaudio", "alsaaudio", "arecord"],
         default="pyaudio",
         help="Audio backend to use for microphone capture (default: pyaudio).",
     )

@@ -3,16 +3,18 @@ from __future__ import annotations
 import io
 import random
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from mmengine import fileio
+import torchaudio
+import pyarrow.parquet as pq
+from mmengine import fileio  # type: ignore
 from PIL import Image
 
-from ..utils import read_parquet, read_video_to_frames
-from .base import DomainHandler
+from ..utils import read_parquet, read_video_to_frames  # type: ignore
+from .base import DomainHandler  # type: ignore
 
 
 def _maybe_join(root: str, maybe_rel: str | None) -> str | None:
@@ -67,7 +69,7 @@ class MultiModalLeRobotHandler(DomainHandler):
 
     dataset_name = "multimodal-lerobot"
 
-    def __init__(self, meta: dict, num_views: int) -> None:
+    def __init__(self, meta: dict, num_views: int, audio_buffer_frames: Optional[int] = None) -> None:
         super().__init__(meta, num_views)
         cfg = meta.get("modality_config", {})
         self.fps = meta.get("fps", cfg.get("fps", 10))
@@ -83,7 +85,9 @@ class MultiModalLeRobotHandler(DomainHandler):
             self.depth_vis_range = [0.0, 2.0]
         self.audio_cfg = meta.get("audio", cfg.get("audio", {}))
         self.audio_enabled = bool(self.audio_cfg.get("enabled", False))
-        self.audio_buffer = max(1, int(self.audio_cfg.get("buffer_frames", 1)))
+        default_buffer = int(self.audio_cfg.get("buffer_frames", 1)) if self.audio_cfg else 1
+        override_buffer = audio_buffer_frames if audio_buffer_frames is not None else default_buffer
+        self.audio_buffer = max(1, int(override_buffer))
         self.audio_sample_rate = int(self.audio_cfg.get("sample_rate", 48000))
         self.audio_stride = max(1, int(self.audio_cfg.get("stride", 1)))
         self.samples_per_audio_frame = max(
@@ -116,7 +120,6 @@ class MultiModalLeRobotHandler(DomainHandler):
             return
 
         depth_cache: Dict[Tuple[str, int], Image.Image] = {}
-        audio_cache: Dict[int, torch.Tensor] = {}
 
         states = episode["state"]
         actions = episode["action"]
@@ -176,10 +179,14 @@ class MultiModalLeRobotHandler(DomainHandler):
                 if torque_seq.shape[0] == num_actions:
                     sample["ft_input"] = torque_seq
 
-            if self.audio_enabled and episode["audio_template"] is not None:
-                audio_tensor = self._build_audio_receding_window(
-                    idx, episode["audio_template"], audio_cache
-                )
+            if self.audio_enabled:
+                audio_tensor = None
+                if episode["audio_info"] is not None:
+                    audio_tensor = self._build_audio_receding_window(idx, episode["audio_info"])
+                elif episode["audio_template"] is not None:
+                    audio_tensor = self._build_audio_receding_window_from_template(
+                        idx, episode["audio_template"]
+                    )
                 if audio_tensor is not None:
                     sample["audio_input"] = audio_tensor
 
@@ -230,7 +237,10 @@ class MultiModalLeRobotHandler(DomainHandler):
 
         videos = self._resolve_video_paths(root, episode_meta)
         depth_templates = self._resolve_depth_templates(root, episode_meta)
-        audio_template = self._resolve_audio_template(root, episode_meta)
+        audio_info = self._load_audio_artifacts(root, episode_meta)
+        audio_template = None
+        if audio_info is None:
+            audio_template = self._resolve_audio_template(root, episode_meta)
 
         return {
             "state": states,
@@ -239,6 +249,7 @@ class MultiModalLeRobotHandler(DomainHandler):
             "torque": torque,
             "videos": videos,
             "depth_templates": depth_templates,
+            "audio_info": audio_info,
             "audio_template": audio_template,
         }
 
@@ -280,13 +291,35 @@ class MultiModalLeRobotHandler(DomainHandler):
     def _resolve_audio_template(self, root: str, episode_meta: dict) -> str | None:
         if not self.audio_enabled:
             return None
-        declared = episode_meta.get("audio_template")
-        if declared:
-            return _maybe_join(root, declared)
         audio_dir = episode_meta.get("audio_dir", "audio")
         pattern = episode_meta.get("audio_pattern", "audio_{frame:06d}.pt")
         rel = fileio.join_path(audio_dir, pattern)
         return _maybe_join(root, rel)
+
+    def _load_audio_artifacts(self, root: str, episode_meta: dict) -> Dict[str, Any] | None:
+        if not self.audio_enabled:
+            return None
+        audio_meta = episode_meta.get("audio")
+        if not audio_meta:
+            return None
+        raw_rel = audio_meta.get("raw_file")
+        index_rel = audio_meta.get("index_file")
+        if raw_rel is None or index_rel is None:
+            return None
+        raw_path = _maybe_join(root, raw_rel)
+        index_path = _maybe_join(root, index_rel)
+        if raw_path is None or index_path is None:
+            return None
+        waveform, sr = torchaudio.load(raw_path)
+        index_table = pq.read_table(index_path)
+        sample_start = np.asarray(index_table["sample_start"].to_pylist(), dtype=np.int64)
+        sample_end = np.asarray(index_table["sample_end"].to_pylist(), dtype=np.int64)
+        return {
+            "waveform": waveform.squeeze(0),
+            "sample_start": sample_start,
+            "sample_end": sample_end,
+            "sample_rate": sr,
+        }
 
     # -------------------------------------------------------------------------
     # Visual helpers
@@ -372,21 +405,54 @@ class MultiModalLeRobotHandler(DomainHandler):
     # Audio helpers
     # -------------------------------------------------------------------------
     def _build_audio_receding_window(
-        self, frame_idx: int, template: str, cache: Dict[int, torch.Tensor]
+        self, frame_idx: int, audio_info: Dict[str, Any]
+    ) -> torch.Tensor | None:
+        waveform = audio_info["waveform"]
+        sample_start = audio_info["sample_start"]
+        sample_end = audio_info["sample_end"]
+        max_frame = len(sample_start) - 1
+        if max_frame < 0:
+            return None
+
+        chunks: List[torch.Tensor] = []
+        for offset in range(-(self.audio_buffer - 1), 1):
+            idx = max(0, frame_idx + offset * self.audio_stride)
+            idx = min(idx, max_frame)
+            start = int(sample_start[idx])
+            end = int(sample_end[idx])
+            start = max(0, min(start, waveform.shape[-1]))
+            end = max(start, min(end, waveform.shape[-1]))
+            chunk = waveform[start:end]
+            chunk = self._normalize_audio_chunk(chunk)
+            chunks.append(chunk)
+        if not chunks:
+            return None
+        return torch.cat(chunks, dim=0)
+
+    def _build_audio_receding_window_from_template(
+        self, frame_idx: int, template: str
     ) -> torch.Tensor | None:
         chunks: List[torch.Tensor] = []
         for offset in range(-(self.audio_buffer - 1), 1):
             idx = max(0, frame_idx + offset * self.audio_stride)
-            chunk = cache.get(idx)
-            if chunk is None:
-                path = template.format(frame=idx)
-                try:
-                    chunk = self._load_audio_chunk(path)
-                except FileNotFoundError:
-                    return None
-                cache[idx] = chunk
+            path = template.format(frame=idx)
+            try:
+                chunk = self._load_audio_chunk(path)
+            except FileNotFoundError:
+                return None
             chunks.append(chunk)
+        if not chunks:
+            return None
         return torch.cat(chunks, dim=0)
+
+    def _normalize_audio_chunk(self, chunk: torch.Tensor) -> torch.Tensor:
+        chunk = chunk.float().view(-1)
+        if chunk.numel() > self.samples_per_audio_frame:
+            chunk = chunk[-self.samples_per_audio_frame :]
+        elif chunk.numel() < self.samples_per_audio_frame:
+            pad = self.samples_per_audio_frame - chunk.numel()
+            chunk = F.pad(chunk, (0, pad))
+        return chunk
 
     def _load_audio_chunk(self, path: str) -> torch.Tensor:
         if fileio.exists(path):
@@ -396,13 +462,7 @@ class MultiModalLeRobotHandler(DomainHandler):
             tensor = torch.load(io.BytesIO(_load_bytes(path)), map_location="cpu")
         if not torch.is_tensor(tensor):
             tensor = torch.as_tensor(tensor)
-        tensor = tensor.float().view(-1)
-        if tensor.numel() > self.samples_per_audio_frame:
-            tensor = tensor[-self.samples_per_audio_frame :]
-        elif tensor.numel() < self.samples_per_audio_frame:
-            pad = self.samples_per_audio_frame - tensor.numel()
-            tensor = F.pad(tensor, (0, pad))
-        return tensor
+        return self._normalize_audio_chunk(tensor)
 
     # -------------------------------------------------------------------------
     # Misc helpers

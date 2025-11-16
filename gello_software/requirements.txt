@@ -5,6 +5,7 @@ Pillow
 pin==3.7.0
 pygame
 pyarrow
+pyalsaaudio
 pyspacemouse
 PyQt6
 pyquaternion
@@ -20,3 +21,4 @@ xarm
 xarm-python-sdk
 numpy-quaternion
 termcolor
+torchaudio

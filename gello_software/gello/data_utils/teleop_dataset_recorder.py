@@ -16,6 +16,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+import torchaudio
 import zmq
 
 from gello.cameras.realsense_camera import RealSenseCamera
@@ -25,6 +26,11 @@ try:
     from multimodal_dataset.audio_processor import PyAudioRecorder
 except ImportError:  # pragma: no cover - optional dependency
     PyAudioRecorder = None  # type: ignore
+
+try:
+    import alsaaudio  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    alsaaudio = None
 
 
 CAMERA_NAME = "cam_front"
@@ -226,6 +232,59 @@ class CameraFrameSource:
             self._local_stream.stop()
 
 
+class ALSAAudioRecorder:
+    """Recorder powered by the pyalsaaudio bindings."""
+
+    def __init__(
+        self,
+        device: str,
+        sample_rate: int,
+        channels: int,
+        period_size: int,
+    ):
+        if alsaaudio is None:
+            raise RuntimeError("pyalsaaudio is not installed. Install with pip install pyalsaaudio.")
+        self.device = device
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.period_size = period_size
+        self.pcm = None
+
+    def start(self):
+        pcm = alsaaudio.PCM(
+            type=alsaaudio.PCM_CAPTURE,
+            mode=alsaaudio.PCM_NORMAL,
+            device=self.device,
+        )
+        pcm.setchannels(self.channels)
+        pcm.setrate(self.sample_rate)
+        pcm.setformat(alsaaudio.PCM_FORMAT_S16_LE)
+        pcm.setperiodsize(self.period_size)
+        self.pcm = pcm
+
+    def read_chunk(self, num_samples: int) -> torch.Tensor:
+        if self.pcm is None:
+            raise RuntimeError("ALSA device not started.")
+        bytes_per_sample = 2 * self.channels
+        required_bytes = num_samples * bytes_per_sample
+        buffer = bytearray()
+        while len(buffer) < required_bytes:
+            length, data = self.pcm.read()
+            if length <= 0 and not buffer:
+                continue
+            buffer.extend(data)
+        array = np.frombuffer(buffer[:required_bytes], dtype=np.int16)
+        if self.channels > 1:
+            array = array.reshape(-1, self.channels).mean(axis=1)
+        tensor = torch.from_numpy(array.astype(np.float32) / 32768.0)
+        return tensor
+
+    def stop(self):
+        if self.pcm is not None:
+            self.pcm.close()
+        self.pcm = None
+
+
 class ArecordRecorder:
     """Audio recorder powered by the `arecord` CLI."""
 
@@ -242,6 +301,7 @@ class ArecordRecorder:
         self.chunk_size = chunk_size
         self.process: Optional[subprocess.Popen] = None
         self.stdout = None
+        self.stderr = None
 
     def start(self):
         cmd = [
@@ -257,11 +317,16 @@ class ArecordRecorder:
             "-t",
             "raw",
             "-q",
+            "-F",
+            str(self.chunk_size),
+            "-B",
+            str(self.chunk_size * 4),
         ]
         try:
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 bufsize=0,
             )
         except FileNotFoundError as exc:
@@ -269,6 +334,14 @@ class ArecordRecorder:
         if self.process.stdout is None:
             raise RuntimeError("Failed to open arecord stdout stream.")
         self.stdout = self.process.stdout
+        self.stderr = self.process.stderr
+
+        time.sleep(0.2)
+        if self.process.poll() is not None:
+            err = ""
+            if self.stderr is not None:
+                err = self.stderr.read().decode(errors="ignore")
+            raise RuntimeError(f"arecord failed to start: {err.strip() or 'unknown error'}")
 
     def read_chunk(self, num_samples: int) -> torch.Tensor:
         if self.stdout is None:
@@ -297,6 +370,9 @@ class ArecordRecorder:
                 self.process.wait()
         self.process = None
         self.stdout = None
+        if self.stderr:
+            self.stderr.close()
+            self.stderr = None
 
 
 class AudioCaptureManager:
@@ -333,6 +409,15 @@ class AudioCaptureManager:
                 chunk_size=1024,
                 device_index=self._device_index,
             )
+        if self._backend == "alsaaudio":
+            if self._alsa_device is None:
+                raise RuntimeError("ALSA device string required for alsaaudio backend (e.g., plughw:1,0).")
+            return ALSAAudioRecorder(
+                device=self._alsa_device,
+                sample_rate=self._sample_rate,
+                channels=1,
+                period_size=self._chunk_size,
+            )
         if self._backend == "arecord":
             if shutil.which("arecord") is None:
                 raise RuntimeError("arecord executable not found. Install alsa-utils or switch backend.")
@@ -361,8 +446,10 @@ class AudioCaptureManager:
         while self._running:
             try:
                 chunk = self._recorder.read_chunk(self._chunk_size)
-            except Exception:
-                continue
+            except Exception as exc:
+                print(f"[dataset] Audio recorder error: {exc}")
+                self._running = False
+                break
             data = chunk.squeeze(-1).numpy()
             with self._lock:
                 self._buffer.append(data)
@@ -502,6 +589,9 @@ class EpisodeWriter:
         self._states: List[List[float]] = []
         self._actions: List[List[float]] = []
         self._torques: List[Optional[List[float]]] = []
+        self._audio_chunks: List[torch.Tensor] = []
+        self._audio_index_rows: List[Dict[str, int]] = []
+        self._audio_sample_cursor: int = 0
 
         self.state_dim: Optional[int] = None
         self.action_dim: Optional[int] = None
@@ -552,15 +642,30 @@ class EpisodeWriter:
             depth_path = self.depth_dir / f"{CAMERA_NAME}_depth_{self._frame_count:06d}.png"
             cv2.imwrite(str(depth_path), depth_img)
 
-        if self.config.enable_audio and audio_chunk is not None:
-            audio_path = self.audio_dir / f"audio_{self._frame_count:06d}.pt"
-            torch.save(audio_chunk.cpu(), audio_path)
+        if self.config.enable_audio:
+            if audio_chunk is None:
+                samples = 0
+            else:
+                samples = int(audio_chunk.numel())
+                if samples > 0:
+                    self._audio_chunks.append(audio_chunk.detach().cpu())
+            start = self._audio_sample_cursor
+            end = start + samples
+            self._audio_sample_cursor = end
+            self._audio_index_rows.append(
+                {
+                    "frame_index": self._frame_count,
+                    "sample_start": start,
+                    "sample_end": end,
+                }
+            )
 
         self._frame_count += 1
 
     def close(self):
         if self._video_writer is not None:
             self._video_writer.release()
+        self._write_audio_artifacts()
         self._write_parquet()
 
     def _write_parquet(self):
@@ -587,6 +692,32 @@ class EpisodeWriter:
         table = pa.Table.from_pydict(data)
         pq.write_table(table, self.data_path)
 
+    def _write_audio_artifacts(self):
+        if not self.config.enable_audio or not self._audio_index_rows:
+            return
+
+        audio_path = self.audio_dir / "raw_audio.wav"
+        index_path = self.audio_dir / "audio_index.parquet"
+
+        if self._audio_chunks:
+            waveform = torch.cat(self._audio_chunks, dim=0).unsqueeze(0)
+        else:
+            waveform = torch.zeros(1, 1, dtype=torch.float32)
+        torchaudio.save(
+            str(audio_path),
+            waveform,
+            self.config.audio_sample_rate,
+        )
+
+        table = pa.table(
+            {
+                "frame_index": [row["frame_index"] for row in self._audio_index_rows],
+                "sample_start": [row["sample_start"] for row in self._audio_index_rows],
+                "sample_end": [row["sample_end"] for row in self._audio_index_rows],
+            }
+        )
+        pq.write_table(table, index_path)
+
     def build_meta_entry(self) -> Dict[str, Any]:
         entry: Dict[str, Any] = {
             "top_path": str(self.episode_dir.resolve()),
@@ -604,6 +735,10 @@ class EpisodeWriter:
             entry["depth_dir"] = DEPTH_DIR
         if self.config.enable_audio:
             entry["audio_dir"] = AUDIO_DIR
+            entry["audio"] = {
+                "raw_file": str(Path(AUDIO_DIR) / "raw_audio.wav"),
+                "index_file": str(Path(AUDIO_DIR) / "audio_index.parquet"),
+            }
         return entry
 
     @property
@@ -817,24 +952,26 @@ class TeleopDatasetController:
         try:
             self.audio_manager.start()
         except Exception as exc:
-            fallback_available = (
-                self.audio_backend == "pyaudio"
-                and shutil.which("arecord") is not None
-                and self.audio_alsa_device is not None
-            )
-            if fallback_available:
-                print(
-                    "[dataset] PyAudio failed to start "
-                    f"({exc}). Falling back to arecord backend."
-                )
+            if self.audio_backend == "pyaudio" and self.audio_alsa_device:
                 try:
-                    self.audio_manager.stop()
-                except Exception:
-                    pass
-                self._initialize_audio_manager("arecord")
-                self.audio_manager.start()
-            else:
-                raise
+                    self.audio_backend = "alsaaudio"
+                    print(
+                        f"[dataset] PyAudio failed to start ({exc}). "
+                        "Falling back to ALSA backend."
+                    )
+                    self._initialize_audio_manager("alsaaudio")
+                    self.audio_manager.start()
+                    return
+                except Exception as alsa_exc:
+                    print(f"[dataset] ALSA backend failed: {alsa_exc}")
+                    if shutil.which("arecord") is not None:
+                        print("[dataset] Falling back to arecord backend.")
+                        self.audio_backend = "arecord"
+                        self._initialize_audio_manager("arecord")
+                        self.audio_manager.start()
+                        return
+                    raise
+            raise
 
     def _log_step(self, obs: Dict[str, Any], action: np.ndarray, timestamp: float):
         if self.current_writer is None:

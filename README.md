@@ -92,9 +92,20 @@ Key details:
 - `--dataset-instruction` populates both `tasks` and `instruction` fields in the metadata. Restart `launch_teleop.py` with the same dataset name but a different instruction to mix tasks within one dataset.
 - Depth, audio, and torque logging are optional (`--dataset-enable-depth`, `--dataset-enable-audio`, `--dataset-enable-torque`). RGB + joint state/action streams are always captured at 12 Hz, audio at 48 kHz mono.
 - For microphones plugged in via ALSA/PortAudio, point the recorder to the correct device using `--dataset-audio-device-name "RØDE NT-USB Mini"` (substring match) or `--dataset-audio-device-index <idx>`; you can also force a specific ALSA PCM via `--dataset-audio-alsa-device plughw:1,0`.
-- The recorder defaults to the PyAudio backend but can be forced (or will automatically fall back) to `arecord` by passing `--dataset-audio-backend arecord` if PortAudio has trouble configuring the device.
+- The recorder defaults to PyAudio but can fall back to ALSA (`--dataset-audio-backend alsaaudio`) or `arecord` if PortAudio refuses to start. Use `--dataset-audio-alsa-device plughw:1,0` to pin the ALSA PCM when using those backends.
 - The dataset metadata lives in `datasets/<dataset_name>/meta/info.json` and follows the schema consumed by the provided `dataset_handler_for_training.py`.
 - The recorder consumes the RealSense viewer feed. `--enable-dataset-recorder` automatically launches the viewer with a ZeroMQ stream so you still get live perception while saving demonstrations.
+
+### Dataset utilities
+
+- Inspect an episode (RGB, depth, trajectories, audio waveform/playback):
+  ```
+  python tools/inspect_dataset_episode.py datasets/coffee --episode-index 3 --play-audio
+  ```
+- Remove the most recently recorded episode(s) if a take went wrong:
+  ```
+  python tools/remove_last_episode.py datasets/coffee --count 1
+  ```
 
 ## Troubleshoot
 - If during installing `multimodal-lerobot-dataset`, there is error on installing `pyaudio`, please run
