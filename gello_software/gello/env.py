@@ -77,6 +77,8 @@ class RobotEnv:
         observations["joint_velocities"] = robot_obs["joint_velocities"]
         observations["ee_pos_quat"] = robot_obs["ee_pos_quat"]
         observations["gripper_position"] = robot_obs["gripper_position"]
+        observations["joint_torques"] = robot_obs["joint_torques"]
+        print("joint_torques: ", observations["joint_torques"])
         return observations
 
 

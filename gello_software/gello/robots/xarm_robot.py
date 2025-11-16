@@ -63,6 +63,7 @@ class RobotState:
     j6: float
     j7: float
     aa: np.ndarray
+    joint_torques: np.ndarray
 
     @staticmethod
     def from_robot(
@@ -70,6 +71,7 @@ class RobotState:
         joints: np.ndarray,
         gripper: float,
         aa: np.ndarray,
+        joint_torques: np.ndarray,
     ) -> "RobotState":
         return RobotState(
             cartesian[0],
@@ -84,6 +86,7 @@ class RobotState:
             joints[5],
             joints[6],
             aa,
+            np.asarray(joint_torques, dtype=float),
         )
 
     def cartesian_pos(self) -> np.ndarray:
@@ -97,6 +100,9 @@ class RobotState:
 
     def gripper_pos(self) -> float:
         return self.gripper
+
+    def torques(self) -> np.ndarray:
+        return np.array(self.joint_torques, dtype=float)
 
 
 class Rate:
@@ -247,6 +253,39 @@ class XArmRobot(Robot):
         )
         return normalized_gripper_pos
 
+    def _get_joint_torques(self) -> np.ndarray:
+        if self.robot is None:
+            return np.zeros(7)
+
+        torques: Optional[np.ndarray] = None
+
+        if hasattr(self.robot, "get_joint_states"):
+            code, joint_states = self.robot.get_joint_states(is_radian=True)
+            while code != 0 or joint_states is None:
+                print(f"Error code {code} in get_joint_states(). {joint_states}")
+                self._clear_error_states()
+                code, joint_states = self.robot.get_joint_states(is_radian=True)
+
+            if (
+                joint_states is not None
+                and len(joint_states) >= 3
+                and joint_states[2] is not None
+            ):
+                torques = np.asarray(joint_states[2], dtype=float)
+
+        if torques is None and hasattr(self.robot, "get_joints_torque"):
+            code, torque_values = self.robot.get_joints_torque()
+            while code != 0 or torque_values is None:
+                print(f"Error code {code} in get_joints_torque(). {torque_values}")
+                self._clear_error_states()
+                code, torque_values = self.robot.get_joints_torque()
+            torques = np.asarray(torque_values, dtype=float)
+
+        if torques is None:
+            return np.zeros(7)
+
+        return torques
+
     def _set_gripper_position(self, pos: int) -> None:
         if self.robot is None:
             return
@@ -307,9 +346,10 @@ class XArmRobot(Robot):
     def _update_last_state(self) -> RobotState:
         with self.last_state_lock:
             if self.robot is None:
-                return RobotState(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, np.zeros(3))
+                return RobotState(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, np.zeros(3), np.zeros(7))
 
             gripper_pos = self._get_gripper_pos()
+            joint_torques = self._get_joint_torques()
 
             code, servo_angle = self.robot.get_servo_angle(is_radian=True)
             while code != 0:
@@ -332,6 +372,7 @@ class XArmRobot(Robot):
                 servo_angle,
                 gripper_pos,
                 aa,
+                joint_torques,
             )
 
     def _set_position(
@@ -366,6 +407,7 @@ class XArmRobot(Robot):
             "joint_velocities": joints,
             "ee_pos_quat": pos_quat,
             "gripper_position": np.array(state.gripper_pos()),
+            "joint_torques": state.torques(),
         }
 
     def _wrap_relative_to_current(self, joints: np.ndarray) -> np.ndarray:
