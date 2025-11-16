@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 def _build_run_env_command(
@@ -42,6 +42,37 @@ def _build_xarm_command(
         f"xArm7RobotsManager(arm_to_use={arm_to_use!r}, viewpoint_arm_start_joints_state={viewpoint_arm_start_joints_state})"
     )
     cmd = [python_executable, "-u", "-c", python_snippet]
+    return cmd, gello_root
+
+
+def _build_realsense_viewer_command(
+    python_executable: str,
+    device_id: Optional[str],
+    flip: bool,
+    depth_scale: float,
+    max_depth_m: float,
+    show_depth: bool,
+    fullscreen: bool,
+    backend: str,
+) -> Tuple[List[str], Path]:
+    """Create the command that launches the RealSense perception viewer."""
+    gello_root = Path(__file__).resolve().parent / "gello_software"
+    script_path = Path("experiments") / "view_realsense_camera.py"
+    cmd: List[str] = [python_executable, str(script_path)]
+    if device_id:
+        cmd.extend(["--device-id", device_id])
+    if flip:
+        cmd.append("--flip")
+    if depth_scale != 0.001:
+        cmd.extend(["--depth-scale", str(depth_scale)])
+    if max_depth_m != 2.5:
+        cmd.extend(["--max-depth-m", str(max_depth_m)])
+    if not show_depth:
+        cmd.append("--hide-depth")
+    if fullscreen:
+        cmd.append("--fullscreen")
+    if backend != "opencv":
+        cmd.extend(["--viewer-backend", backend])
     return cmd, gello_root
 
 
@@ -92,6 +123,49 @@ def main() -> None:
         default=sys.executable,
         help="Python interpreter to use when launching child processes.",
     )
+    parser.add_argument(
+        "--enable-camera-viewer",
+        action="store_true",
+        help="Launch the RealSense perception viewer alongside teleop.",
+    )
+    parser.add_argument(
+        "--realsense-device-id",
+        default=None,
+        help="Optional serial number for the RealSense D435i used for visualization.",
+    )
+    parser.add_argument(
+        "--realsense-depth-scale",
+        type=float,
+        default=0.001,
+        help="Meters per depth unit reported by the RealSense depth image (default 0.001).",
+    )
+    parser.add_argument(
+        "--realsense-max-depth",
+        type=float,
+        default=2.5,
+        help="Maximum depth (meters) mapped to the viewer color map.",
+    )
+    parser.add_argument(
+        "--realsense-flip",
+        action="store_true",
+        help="Rotate RealSense frames 180 degrees before visualization.",
+    )
+    parser.add_argument(
+        "--viewer-hide-depth",
+        action="store_true",
+        help="Disable the depth window when launching the viewer.",
+    )
+    parser.add_argument(
+        "--viewer-fullscreen",
+        action="store_true",
+        help="Open the viewer windows in fullscreen mode.",
+    )
+    parser.add_argument(
+        "--viewer-backend",
+        choices=["opencv", "pygame"],
+        default="pygame",
+        help="Visualization backend to use for the RealSense viewer.",
+    )
     args, forward_args = parser.parse_known_args()
     
     print(f"Viewpoint option: {args.viewpoint_option}")
@@ -118,6 +192,17 @@ def main() -> None:
         arm_to_use=args.arm_to_use,
         viewpoint_arm_start_joints_state=viewpoint_arm_start_joints_state,
     )
+    if args.enable_camera_viewer:
+        commands["realsense_viewer"] = _build_realsense_viewer_command(
+            python_executable=args.python_executable,
+            device_id=args.realsense_device_id,
+            flip=args.realsense_flip,
+            depth_scale=args.realsense_depth_scale,
+            max_depth_m=args.realsense_max_depth,
+            show_depth=not args.viewer_hide_depth,
+            fullscreen=args.viewer_fullscreen,
+            backend=args.viewer_backend,
+        )
 
     processes: Dict[str, subprocess.Popen] = {}
     try:

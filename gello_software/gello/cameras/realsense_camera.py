@@ -28,6 +28,7 @@ class RealSenseCamera(CameraDriver):
         import pyrealsense2 as rs
 
         self._device_id = device_id
+        self._running = False
 
         if device_id is None:
             ctx = rs.context()
@@ -44,8 +45,10 @@ class RealSenseCamera(CameraDriver):
 
         config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
         config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        self._config = config
         self._pipeline.start(config)
         self._flip = flip
+        self._running = True
 
     def read(
         self,
@@ -62,6 +65,9 @@ class RealSenseCamera(CameraDriver):
             np.ndarray: The depth image, shape=(H, W, 1)
         """
         import cv2
+
+        if not self._running:
+            raise RuntimeError("RealSense pipeline is not running. Call start() before read().")
 
         frames = self._pipeline.wait_for_frames()
         color_frame = frames.get_color_frame()
@@ -84,6 +90,38 @@ class RealSenseCamera(CameraDriver):
             depth = depth[:, :, None]
 
         return image, depth
+
+    def start(self) -> None:
+        """Start streaming if it was previously stopped."""
+        if self._running:
+            return
+        import pyrealsense2 as rs
+
+        self._pipeline = rs.pipeline()
+        config = rs.config()
+        if self._device_id is not None:
+            config.enable_device(self._device_id)
+        config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        self._config = config
+        self._pipeline.start(config)
+        self._running = True
+
+    def stop(self) -> None:
+        """Stop streaming and release the pipeline."""
+        if self._running and hasattr(self, "_pipeline"):
+            self._pipeline.stop()
+            self._running = False
+
+    def close(self) -> None:
+        """Alias for stop to mirror common resource lifecycles."""
+        self.stop()
+
+    def __del__(self):
+        try:
+            self.stop()
+        except Exception:
+            pass
 
 
 def _debug_read(camera, save_datastream=False):
