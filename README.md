@@ -7,6 +7,8 @@
     git clone https://github.com/M4D-SC1ENTIST/apollo-bimanual-xarm7-gello-teleop.git
 
     cd apollo-bimanual-xarm7-gello-teleop
+
+    git submodule update --init --recursive
     ```
 
 2. Create and activate a virtual environment. If you don't have [uv](https://docs.astral.sh/uv/) installed, you need to first install it.
@@ -18,6 +20,9 @@
     uv pip install -r requirements.txt
     uv pip install -e .
     uv pip install -e third_party/DynamixelSDK/python
+
+    cd ..
+    uv pip install -e multimodal-lerobot-dataset
     ```
 
 ## Usage
@@ -31,4 +36,10 @@
     python launch_teleop.py --arm-to-use left --viewpoint-option none
     python launch_teleop.py --arm-to-use right --viewpoint-option none
     python launch_teleop.py --arm-to-use both --viewpoint-option coffee
+    ```
+
+## Troubleshoot
+- If during installing `multimodal-lerobot-dataset`, there is error on installing `pyaudio`, please run
+    ```
+    sudo apt install portaudio19-dev
     ```
