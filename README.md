@@ -16,8 +16,9 @@
     uv venv --python 3.11
     source .venv/bin/activate  # Run this every time you open a new shell
 
-    cd gello_software/
     uv pip install -r requirements.txt
+
+    cd gello_software/
     uv pip install -e .
     uv pip install -e third_party/DynamixelSDK/python
 
