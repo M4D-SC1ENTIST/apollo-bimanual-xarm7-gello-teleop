@@ -230,6 +230,12 @@ def main() -> None:
         help="Instruction/task description stored with each episode.",
     )
     parser.add_argument(
+        "--dataset-registry-key",
+        type=str,
+        default="multimodal-lerobot",
+        help="Dataset name key to store in info.json (for registry lookup).",
+    )
+    parser.add_argument(
         "--dataset-root",
         type=str,
         default=str((Path(__file__).resolve().parent / "datasets").resolve()),
@@ -332,6 +338,8 @@ def main() -> None:
             dataset_args.extend(["--dataset-name", args.dataset_name])
         if args.dataset_instruction:
             dataset_args.extend(["--dataset-instruction", args.dataset_instruction])
+        if args.dataset_registry_key:
+            dataset_args.extend(["--dataset-registry-key", args.dataset_registry_key])
         if args.dataset_enable_depth:
             dataset_args.append("--dataset-enable-depth")
         if args.dataset_enable_audio:

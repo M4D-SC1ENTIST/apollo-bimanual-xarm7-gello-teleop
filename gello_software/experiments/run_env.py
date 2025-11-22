@@ -60,6 +60,7 @@ class Args:
     dataset_audio_device_index: Optional[int] = None
     dataset_audio_backend: str = "pyaudio"
     dataset_audio_alsa_device: Optional[str] = None
+    dataset_registry_key: str = "multimodal-lerobot"
 
     def __post_init__(self):
         if self.start_joints is not None:
@@ -297,6 +298,7 @@ def main(args):
             audio_device_index=args.dataset_audio_device_index,
             audio_backend=args.dataset_audio_backend,
             audio_alsa_device=args.dataset_audio_alsa_device,
+            dataset_registry_key=args.dataset_registry_key,
         )
         dataset_controller = TeleopDatasetController(ds_config, args.arm_to_use)
 

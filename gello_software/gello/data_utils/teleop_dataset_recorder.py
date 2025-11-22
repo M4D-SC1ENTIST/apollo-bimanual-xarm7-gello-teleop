@@ -62,6 +62,7 @@ class DatasetRecordingConfig:
     audio_device_index: Optional[int] = None
     audio_backend: str = "pyaudio"
     audio_alsa_device: Optional[str] = None
+    dataset_registry_key: str = "multimodal-lerobot"
 
 
 class ViewerStreamSubscriber:
@@ -867,7 +868,7 @@ class DatasetRecorder:
             metadata = json.loads(meta_path.read_text())
         else:
             metadata = {
-                "dataset_name": dataset_name,
+                "dataset_name": self.config.dataset_registry_key,
                 "fps": self.config.fps,
                 "state_key": "observation.state",
                 "action_key": "action",
