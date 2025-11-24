@@ -112,10 +112,19 @@ class MultiModalLeRobotHandler(DomainHandler):
         episode_meta = self.meta["datalist"][traj_idx]
         episode = self._prepare_episode_payload(episode_meta)
 
-        rgb_buffers = {
-            cam: read_video_to_frames(path) for cam, path in episode["videos"].items()
-        }
-        num_frames = len(next(iter(rgb_buffers.values()))) if rgb_buffers else 0
+        skip_images = kwargs.get("skip_images", False)
+        rgb_buffers = {}
+        if not skip_images:
+            rgb_buffers = {
+                cam: read_video_to_frames(path) for cam, path in episode["videos"].items()
+            }
+            
+        if rgb_buffers:
+            num_frames = len(next(iter(rgb_buffers.values())))
+        else:
+            # Fallback to state length if images are skipped or missing
+            num_frames = len(episode["state"])
+
         if num_frames == 0:
             return
 
@@ -156,11 +165,19 @@ class MultiModalLeRobotHandler(DomainHandler):
             if action_seq.shape[0] != num_actions:
                 continue
 
-            imgs = self._build_visual_stack(
-                idx, rgb_buffers, episode["depth_templates"], depth_cache, image_aug
-            )
-            if imgs is None:
-                continue
+            if not skip_images:
+                imgs = self._build_visual_stack(
+                    idx, rgb_buffers, episode["depth_templates"], depth_cache, image_aug
+                )
+                if imgs is None:
+                    continue
+            else:
+                # Dummy images for stats calculation
+                # Shape: [V, C, H, W] -> [1, 3, 224, 224] dummy
+                imgs = {
+                    "tensor": torch.empty(1, 3, 224, 224), 
+                    "mask": torch.ones(1, dtype=torch.bool)
+                }
 
             sample = {
                 "language_instruction": self._augment_instruction(
