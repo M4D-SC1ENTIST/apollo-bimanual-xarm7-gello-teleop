@@ -82,7 +82,8 @@ python launch_teleop.py \
     --dataset-instruction "put the coffee pod into the coffee maker" \
     --dataset-enable-depth \
     --dataset-enable-audio \
-    --dataset-enable-torque ```
+    --dataset-enable-torque 
+```
 
 Key details:
 
