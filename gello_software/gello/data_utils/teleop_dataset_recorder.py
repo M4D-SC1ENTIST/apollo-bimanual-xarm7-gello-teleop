@@ -637,6 +637,8 @@ class EpisodeWriter:
         self._frame_indices: List[int] = []
         self._states: List[List[float]] = []
         self._actions: List[List[float]] = []
+        self._ee_pos_quat: List[List[float]] = []
+        self._gripper_positions: List[List[float]] = []
         self._torques: List[Optional[List[float]]] = []
         self._audio_chunks: List[torch.Tensor] = []
         self._audio_index_rows: List[Dict[str, int]] = []
@@ -645,6 +647,8 @@ class EpisodeWriter:
         self.state_dim: Optional[int] = None
         self.action_dim: Optional[int] = None
         self.torque_dim: Optional[int] = None
+        self.ee_dim: Optional[int] = None
+        self.gripper_dim: Optional[int] = None
 
         self._video_writer: Optional[cv2.VideoWriter] = None
         if config.enable_rgb:
@@ -659,6 +663,8 @@ class EpisodeWriter:
         timestamp: float,
         state: List[float],
         action: List[float],
+        ee_pos_quat: Optional[List[float]],
+        gripper_position: Optional[List[float]],
         torque: Optional[List[float]],
         rgb_frame: Optional[np.ndarray],
         depth_frame: Optional[np.ndarray],
@@ -670,11 +676,31 @@ class EpisodeWriter:
             self.action_dim = len(action)
         if torque is not None and self.torque_dim is None:
             self.torque_dim = len(torque)
+        ee_entry: List[float]
+        if ee_pos_quat is not None:
+            if self.ee_dim is None:
+                self.ee_dim = len(ee_pos_quat)
+            ee_entry = ee_pos_quat
+        else:
+            if self.ee_dim is None:
+                self.ee_dim = 0
+            ee_entry = [0.0] * self.ee_dim if self.ee_dim else []
+
+        if gripper_position is not None:
+            if self.gripper_dim is None:
+                self.gripper_dim = len(gripper_position)
+            gripper_entry = gripper_position
+        else:
+            if self.gripper_dim is None:
+                self.gripper_dim = 0
+            gripper_entry = [0.0] * self.gripper_dim if self.gripper_dim else []
 
         self._timestamps.append(timestamp)
         self._frame_indices.append(self._frame_count)
         self._states.append(state)
         self._actions.append(action)
+        self._ee_pos_quat.append(ee_entry)
+        self._gripper_positions.append(gripper_entry)
         self._torques.append(torque)
 
         if self._video_writer is not None:
@@ -726,6 +752,12 @@ class EpisodeWriter:
             "frame_index": pa.array(self._frame_indices, type=pa.int32()),
             "observation.state": pa.array(
                 self._states, type=pa.list_(pa.float32())
+            ),
+            "observation.ee_pos_quat": pa.array(
+                self._ee_pos_quat, type=pa.list_(pa.float32())
+            ),
+            "observation.gripper_position": pa.array(
+                self._gripper_positions, type=pa.list_(pa.float32())
             ),
             "action": pa.array(self._actions, type=pa.list_(pa.float32())),
         }
@@ -828,6 +860,8 @@ class DatasetRecorder:
         metadata["fps"] = self.config.fps
         metadata["state_key"] = "observation.state"
         metadata["action_key"] = "action"
+        metadata["ee_pos_quat_key"] = "observation.ee_pos_quat"
+        metadata["gripper_key"] = "observation.gripper_position"
         if metadata.get("torque_key") is None and self.config.enable_torque:
             metadata["torque_key"] = "observation.torque"
         metadata.setdefault("torque_time_key", None)
@@ -872,6 +906,8 @@ class DatasetRecorder:
                 "fps": self.config.fps,
                 "state_key": "observation.state",
                 "action_key": "action",
+                "ee_pos_quat_key": "observation.ee_pos_quat",
+                "gripper_key": "observation.gripper_position",
                 "torque_key": "observation.torque" if self.config.enable_torque else None,
                 "torque_time_key": None,
                 "cameras": {
@@ -958,6 +994,8 @@ class TeleopDatasetController:
         self.interval = 1.0 / max(config.fps, 1.0)
         self._warned_camera = False
         self._warned_torque = False
+        self._warned_ee = False
+        self._warned_gripper = False
 
     def update(self, obs: Dict[str, Any], action: np.ndarray):
         if not self.config.enabled or self.keyboard is None:
@@ -1032,6 +1070,25 @@ class TeleopDatasetController:
             if joint_torques is not None:
                 torque_vec = np.asarray(joint_torques, dtype=np.float32).tolist()
 
+        ee_pos_quat = obs.get("ee_pos_quat")
+        ee_vec: Optional[List[float]]
+        if ee_pos_quat is None:
+            if not self._warned_ee:
+                print("[dataset] ee_pos_quat missing from observations; EEF logging disabled.")
+                self._warned_ee = True
+            ee_vec = None
+        else:
+            ee_vec = np.asarray(ee_pos_quat, dtype=np.float32).tolist()
+
+        gripper_pos = obs.get("gripper_position")
+        if gripper_pos is None:
+            if not self._warned_gripper:
+                print("[dataset] gripper_position missing from observations; gripper logging disabled.")
+                self._warned_gripper = True
+            gripper_vec: Optional[List[float]] = None
+        else:
+            gripper_vec = np.atleast_1d(np.asarray(gripper_pos, dtype=np.float32)).tolist()
+
         rgb = None
         depth = None
         if frame_payload is None and self.camera_source is not None and not self._warned_camera:
@@ -1048,6 +1105,8 @@ class TeleopDatasetController:
             timestamp=timestamp,
             state=joint_positions.tolist(),
             action=action_vec.tolist(),
+            ee_pos_quat=ee_vec,
+            gripper_position=gripper_vec,
             torque=torque_vec,
             rgb_frame=rgb,
             depth_frame=depth,
@@ -1068,6 +1127,8 @@ class TeleopDatasetController:
         self.recording = False
         self._warned_camera = False
         self._warned_torque = False
+        self._warned_ee = False
+        self._warned_gripper = False
         self._audio_reference_time = None
         self._audio_samples_written = 0
         self._last_frame_timestamp = None

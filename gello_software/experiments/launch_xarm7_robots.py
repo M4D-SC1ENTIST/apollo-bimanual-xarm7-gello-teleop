@@ -63,14 +63,14 @@ class xArm7RobotsManager:
             
             
             # Set viewpoint arm to intermediate position
-            intermediate_joints_state_1 = [0.0, -1.5707963267948966, 0.0, 0.0, 0.0, 0.0, 0.0]
-            intermediate_joints_state_2 = [3.141592653589793, -1.5707963267948966, 0.0, 0.0, 0.0, 0.0, 0.0]
-            ret = self.viewpoint_arm.set_servo_angle(angle=intermediate_joints_state_1, speed=reset_joint_speed, wait=True, is_radian=True)
-            if ret in [1, 9]:
-                self.viewpoint_arm.clean_error()
-            ret = self.viewpoint_arm.set_servo_angle(angle=intermediate_joints_state_2, speed=reset_joint_speed, wait=True, is_radian=True)
-            if ret in [1, 9]:
-                self.viewpoint_arm.clean_error()
+            #intermediate_joints_state_1 = [0.0, -1.5707963267948966, 0.0, 0.0, 0.0, 0.0, 0.0]
+            #intermediate_joints_state_2 = [3.141592653589793, -1.5707963267948966, 0.0, 0.0, 0.0, 0.0, 0.0]
+            #ret = self.viewpoint_arm.set_servo_angle(angle=intermediate_joints_state_1, speed=reset_joint_speed, wait=True, is_radian=True)
+            #if ret in [1, 9]:
+            #    self.viewpoint_arm.clean_error()
+            #ret = self.viewpoint_arm.set_servo_angle(angle=intermediate_joints_state_2, speed=reset_joint_speed, wait=True, is_radian=True)
+            #if ret in [1, 9]:
+            #    self.viewpoint_arm.clean_error()
 
             # Reset viewpoint arm
             ret = self.viewpoint_arm.set_servo_angle(angle=viewpoint_arm_start_joints_state[1:8], speed=reset_joint_speed, wait=True, is_radian=True)

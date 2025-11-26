@@ -87,6 +87,16 @@ def visualize_episode(dataset_path: Path, episode_idx: int, play_audio: bool):
     data_table = pq.read_table(episode_dir / "data.parquet")
     states = np.stack(data_table["observation.state"].to_pylist())
     actions = np.stack(data_table["action"].to_pylist())
+    ee_pos_quat = (
+        np.stack(data_table["observation.ee_pos_quat"].to_pylist())
+        if "observation.ee_pos_quat" in data_table.column_names
+        else None
+    )
+    gripper = (
+        np.stack(data_table["observation.gripper_position"].to_pylist())
+        if "observation.gripper_position" in data_table.column_names
+        else None
+    )
     torque = (
         np.stack(data_table["observation.torque"].to_pylist())
         if "observation.torque" in data_table.column_names
@@ -127,6 +137,49 @@ def visualize_episode(dataset_path: Path, episode_idx: int, play_audio: bool):
     plt.title("Audio waveform")
     plt.xlabel("Sample")
     plt.show()
+
+    if ee_pos_quat is not None:
+        arm_dim = 7
+        total_dim = ee_pos_quat.shape[1]
+        num_arms = max(1, total_dim // arm_dim) if total_dim >= arm_dim else 1
+        pos_series = []
+        quat_series = []
+        for arm_idx in range(num_arms):
+            start = arm_idx * arm_dim
+            end = min(start + arm_dim, total_dim)
+            arm_slice = ee_pos_quat[:, start:end]
+            pos_series.append(arm_slice[:, : min(3, arm_slice.shape[1])])
+            if arm_slice.shape[1] > 3:
+                quat_series.append(arm_slice[:, 3: min(7, arm_slice.shape[1])])
+        pos_stack = np.hstack(pos_series) if pos_series else None
+        quat_stack = np.hstack(quat_series) if quat_series else None
+
+        if pos_stack is not None or quat_stack is not None:
+            plt.figure(figsize=(10, 6))
+            ax_pos = plt.subplot(2, 1, 1)
+            if pos_stack is not None:
+                _plot_trajectories(ax_pos, pos_stack, "EEF Position")
+            else:
+                ax_pos.text(0.5, 0.5, "No EEF position data", ha="center")
+                ax_pos.axis("off")
+            ax_quat = plt.subplot(2, 1, 2)
+            if quat_stack is not None:
+                _plot_trajectories(ax_quat, quat_stack, "EEF Quaternion")
+            else:
+                ax_quat.text(0.5, 0.5, "No EEF quaternion data", ha="center")
+                ax_quat.axis("off")
+            plt.tight_layout()
+            plt.show()
+    else:
+        print("[inspect] observation.ee_pos_quat not present in data.parquet")
+
+    if gripper is not None:
+        plt.figure()
+        _plot_trajectories(plt.gca(), gripper, "Gripper Position")
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("[inspect] observation.gripper_position not present in data.parquet")
 
     if play_audio:
         _play_audio(waveform.squeeze(0), sample_rate)
