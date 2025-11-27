@@ -46,6 +46,8 @@ class ZMQServerRobot:
                     result = self._robot.get_joint_state()
                 elif method == "command_joint_state":
                     result = self._robot.command_joint_state(**args)
+                elif method == "command_ee_pose":
+                    result = self._robot.command_ee_pose(**args)
                 elif method == "get_observations":
                     result = self._robot.get_observations()
                 else:
@@ -111,6 +113,25 @@ class ZMQClientRobot(Robot):
         request = {
             "method": "command_joint_state",
             "args": {"joint_state": joint_state},
+        }
+        send_message = pickle.dumps(request)
+        self._socket.send(send_message)
+        result = pickle.loads(self._socket.recv())
+        return result
+
+    def command_ee_pose(
+        self,
+        position: np.ndarray,
+        axis_angle: np.ndarray,
+        gripper: float | None = None,
+    ) -> None:
+        request = {
+            "method": "command_ee_pose",
+            "args": {
+                "position": np.asarray(position, dtype=float),
+                "axis_angle": np.asarray(axis_angle, dtype=float),
+                "gripper": gripper,
+            },
         }
         send_message = pickle.dumps(request)
         self._socket.send(send_message)

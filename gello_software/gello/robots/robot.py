@@ -37,6 +37,17 @@ class Robot(Protocol):
         """
         raise NotImplementedError
 
+    def command_ee_pose(
+        self,
+        position: np.ndarray,
+        axis_angle: np.ndarray,
+        gripper: float | None = None,
+    ) -> None:
+        """Command the robot using an end-effector pose (axis-angle)."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement end-effector commands"
+        )
+
     @abstractmethod
     def get_observations(self) -> Dict[str, np.ndarray]:
         """Get the current observations of the robot.
@@ -74,6 +85,10 @@ class PrintRobot(Robot):
         if not self._dont_print:
             print(self._joint_state)
 
+    def command_ee_pose(self, position: np.ndarray, axis_angle: np.ndarray, gripper: float | None = None) -> None:
+        if not self._dont_print:
+            print(f"EE pose command -> pos={position}, axis_angle={axis_angle}, gripper={gripper}")
+
     def get_observations(self) -> Dict[str, np.ndarray]:
         joint_state = self.get_joint_state()
         pos_quat = np.zeros(7)
@@ -101,6 +116,9 @@ class BimanualRobot(Robot):
     def command_joint_state(self, joint_state: np.ndarray) -> None:
         self._robot_l.command_joint_state(joint_state[: self._robot_l.num_dofs()])
         self._robot_r.command_joint_state(joint_state[self._robot_l.num_dofs() :])
+
+    def command_ee_pose(self, position: np.ndarray, axis_angle: np.ndarray, gripper: float | None = None) -> None:
+        raise NotImplementedError("BimanualRobot does not support single-arm EE pose commands")
 
     def get_observations(self) -> Dict[str, np.ndarray]:
         l_obs = self._robot_l.get_observations()

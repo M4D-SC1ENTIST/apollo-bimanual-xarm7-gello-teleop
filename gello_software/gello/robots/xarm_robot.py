@@ -169,6 +169,8 @@ class XArmRobot(Robot):
         print(ip)
         self.real = real
         self.max_delta = max_delta
+        self._cartesian_speed = 200.0
+        self._cartesian_acc = 1000.0
         if real:
             from xarm.wrapper import XArmAPI
 
@@ -178,12 +180,14 @@ class XArmRobot(Robot):
 
         self._control_frequency = control_frequency
         self._clear_error_states()
+        self._motion_mode = 0
         self._set_gripper_position(self.GRIPPER_OPEN)
 
         self.last_state_lock = threading.Lock()
         self.target_command_lock = threading.Lock()
         self.last_state = self._update_last_state()
         self.target_command = {
+            "mode": "joint",
             "joints": self.last_state.joints(),
             "gripper": 0,
         }
@@ -203,7 +207,29 @@ class XArmRobot(Robot):
         joints = self._apply_joint_limits(joints)
         with self.target_command_lock:
             self.target_command = {
+                "mode": "joint",
                 "joints": joints,
+                "gripper": gripper,
+            }
+
+    def command_ee_pose(
+        self,
+        position: np.ndarray,
+        axis_angle: np.ndarray,
+        gripper: Optional[float] = None,
+    ) -> None:
+        position = np.asarray(position, dtype=float)
+        axis_angle = np.asarray(axis_angle, dtype=float)
+        #print(f"Commanding EE pose: position={position}, axis_angle={axis_angle}, gripper={gripper}")
+        if position.shape != (3,) or axis_angle.shape != (3,):
+            raise ValueError("position and axis_angle must be 3D vectors")
+        with self.target_command_lock:
+            self.target_command = {
+                "mode": "ee",
+                "ee_pose": {
+                    "position": position.copy(),
+                    "axis_angle": axis_angle.copy(),
+                },
                 "gripper": gripper,
             }
 
@@ -236,6 +262,18 @@ class XArmRobot(Robot):
         time.sleep(1)
         self.robot.set_gripper_speed(3000)
         time.sleep(1)
+        self._motion_mode = 0
+
+    def _switch_motion_mode(self, mode: int) -> None:
+        if self.robot is None:
+            return
+        if getattr(self, "_motion_mode", None) == mode:
+            return
+        self.robot.set_mode(mode)
+        time.sleep(0.05)
+        self.robot.set_state(0)
+        time.sleep(0.05)
+        self._motion_mode = mode
 
     def _get_gripper_pos(self) -> float:
         if self.robot is None:
@@ -302,42 +340,47 @@ class XArmRobot(Robot):
 
         while self.running:
             s_t = time.time()
-            # update last state
             self.last_state = self._update_last_state()
             with self.target_command_lock:
-                joint_delta = np.array(
-                    self.target_command["joints"] - self.last_state.joints()
-                )
-                gripper_command = self.target_command["gripper"]
+                cmd_mode = self.target_command.get("mode", "joint")
+                if cmd_mode == "ee":
+                    ee_target = self.target_command.get("ee_pose")
+                    gripper_command = self.target_command.get("gripper")
+                    #print(f"EE target: {ee_target}, Gripper command: {gripper_command}")
+                    self.target_command = {
+                        "mode": "joint",
+                        "joints": self.last_state.joints(),
+                        "gripper": None,
+                    }
+                    joints_target = None
+                else:
+                    ee_target = None
+                    gripper_command = self.target_command.get("gripper")
+                    joints_target = self.target_command.get("joints", self.last_state.joints())
 
-            norm = np.linalg.norm(joint_delta)
-
-            # threshold delta to be at most 0.01 in norm space
-            if norm > self.max_delta:
-                delta = joint_delta / norm * self.max_delta
+            if ee_target is not None:
+                self._execute_ee_command(ee_target, gripper_command)
             else:
-                delta = joint_delta
+                joint_delta = np.array(joints_target - self.last_state.joints())
+                norm = np.linalg.norm(joint_delta)
+                delta = joint_delta / norm * self.max_delta if norm > self.max_delta else joint_delta
 
-            if norm > 1e-6:
-                self._set_position(
-                    self.last_state.joints() + delta,
-                )
+                if norm > 1e-6:
+                    self._set_position(self.last_state.joints() + delta)
 
-            if gripper_command is not None:
-                set_point = gripper_command
-                self._set_gripper_position(
-                    self.GRIPPER_OPEN
-                    + set_point * (self.GRIPPER_CLOSE - self.GRIPPER_OPEN)
-                )
+                if gripper_command is not None:
+                    set_point = gripper_command
+                    self._set_gripper_position(
+                        self.GRIPPER_OPEN
+                        + set_point * (self.GRIPPER_CLOSE - self.GRIPPER_OPEN)
+                    )
+
             self.last_state = self._update_last_state()
-
             rate.sleep()
             step_times.append(time.time() - s_t)
             count += 1
             if count % 1000 == 0:
-                # Mean, Std, Min, Max, only show 3 decimal places and string pad with 10 spaces
                 frequency = 1 / np.mean(step_times)
-                # print(f"Step time - mean: {np.mean(step_times):10.3f}, std: {np.std(step_times):10.3f}, min: {np.min(step_times):10.3f}, max: {np.max(step_times):10.3f}")
                 print(
                     f"Low  Level Frequency - mean: {frequency:10.3f}, std: {np.std(frequency):10.3f}, min: {np.min(frequency):10.3f}, max: {np.max(frequency):10.3f}"
                 )
@@ -381,6 +424,7 @@ class XArmRobot(Robot):
     ) -> None:
         if self.robot is None:
             return
+        self._switch_motion_mode(0)
         limited_joints = self._apply_joint_limits(joints)
         ret = self.robot.set_servo_angle_j(limited_joints, wait=False, is_radian=True)
         if ret in [1, 9, -8]:
@@ -397,6 +441,42 @@ class XArmRobot(Robot):
                         print(
                             f"[WARN] Failed to recover from joint limit violation. code={ret}, joints={wrapped_joints}"
                         )
+
+    def _execute_ee_command(
+        self,
+        ee_target: Dict[str, np.ndarray],
+        gripper_command: Optional[float],
+    ) -> None:
+        if self.robot is None:
+            return
+
+        pos = np.asarray(ee_target.get("position"), dtype=float)
+        rot = np.asarray(ee_target.get("axis_angle"), dtype=float)
+        if pos.shape != (3,) or rot.shape != (3,):
+            return
+
+        self._switch_motion_mode(1)
+        pose_mm = np.concatenate([pos * 1000.0, rot])
+        code = self.robot.set_servo_cartesian_aa(
+            pose_mm.tolist(),
+            speed=self._cartesian_speed,
+            mvacc=self._cartesian_acc,
+            is_radian=True,
+            is_tool_coord=False,
+            relative=False,
+        )
+        print("Return Code for EE Command: ", code)
+        if code not in (0, None):
+            if code in [1, 9, -8]:
+                self._clear_error_states()
+
+        if gripper_command is not None:
+            set_point = float(np.clip(gripper_command, 0.0, 1.0))
+            servo_value = int(
+                self.GRIPPER_OPEN
+                + set_point * (self.GRIPPER_CLOSE - self.GRIPPER_OPEN)
+            )
+            self._set_gripper_position(servo_value)
 
     def get_observations(self) -> Dict[str, np.ndarray]:
         state = self.get_state()
