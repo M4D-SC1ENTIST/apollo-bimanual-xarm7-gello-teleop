@@ -2,7 +2,7 @@ import glob
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import numpy as np
 import tyro
@@ -61,10 +61,38 @@ class Args:
     dataset_audio_backend: str = "pyaudio"
     dataset_audio_alsa_device: Optional[str] = None
     dataset_registry_key: str = "multimodal-lerobot"
+    gripper_control_mode: Literal["continuous", "discrete"] = "continuous"
 
     def __post_init__(self):
         if self.start_joints is not None:
             self.start_joints = np.array(self.start_joints)
+
+
+GRIPPER_BINARY_THRESHOLD = 0.5
+
+
+def _infer_gripper_indices(length: int, arm_to_use: str) -> Tuple[int, ...]:
+    if length <= 0:
+        return tuple()
+    if arm_to_use == "both" and length % 2 == 0:
+        per_arm = length // 2
+        return (per_arm - 1, length - 1)
+    return (length - 1,)
+
+
+def _build_gripper_transform(mode: str, arm_to_use: str):
+    if mode != "discrete":
+        return None
+
+    def _transform(action: np.ndarray) -> np.ndarray:
+        arr = np.asarray(action, dtype=np.float32).copy()
+        indices = _infer_gripper_indices(arr.shape[-1], arm_to_use)
+        for idx in indices:
+            if 0 <= idx < arr.shape[-1]:
+                arr[..., idx] = 1.0 if arr[..., idx] >= GRIPPER_BINARY_THRESHOLD else 0.0
+        return arr
+
+    return _transform
 
 
 def main(args):
@@ -299,6 +327,7 @@ def main(args):
             audio_backend=args.dataset_audio_backend,
             audio_alsa_device=args.dataset_audio_alsa_device,
             dataset_registry_key=args.dataset_registry_key,
+            gripper_control_mode=args.gripper_control_mode,
         )
         dataset_controller = TeleopDatasetController(ds_config, args.arm_to_use)
 
@@ -314,6 +343,7 @@ def main(args):
         save_interface,
         use_colors=True,
         dataset_controller=dataset_controller,
+        action_transform=_build_gripper_transform(args.gripper_control_mode, args.arm_to_use),
     )
 
 

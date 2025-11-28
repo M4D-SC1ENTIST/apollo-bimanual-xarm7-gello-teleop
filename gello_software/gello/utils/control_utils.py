@@ -3,7 +3,7 @@
 import datetime
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
@@ -139,6 +139,7 @@ def run_control_loop(
     print_timing: bool = True,
     use_colors: bool = False,
     dataset_controller: Optional[Any] = None,
+    action_transform: Optional[Callable[[np.ndarray], np.ndarray]] = None,
 ) -> None:
     """Run the main control loop.
 
@@ -181,6 +182,8 @@ def run_control_loop(
                     print(message, end="", flush=True)
 
             action = agent.act(obs)
+            if action_transform is not None:
+                action = action_transform(action)
 
             if dataset_controller is not None:
                 dataset_controller.update(obs, action)

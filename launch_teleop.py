@@ -304,7 +304,15 @@ def main() -> None:
         default=None,
         help="Explicit ALSA device string for arecord fallback (e.g., plughw:1,0).",
     )
+    parser.add_argument(
+        "--gripper-control-mode",
+        choices=["continuous", "discrete"],
+        default="discrete",
+        help="Control mode for the gripper. Discrete mode thresholds the teleop command and recorded data.",
+    )
     args, forward_args = parser.parse_known_args()
+
+    forward_args.extend(["--gripper-control-mode", args.gripper_control_mode])
     
     print(f"Viewpoint option: {args.viewpoint_option}")
     if args.viewpoint_option == "none":

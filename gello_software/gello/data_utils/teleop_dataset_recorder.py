@@ -63,6 +63,10 @@ class DatasetRecordingConfig:
     audio_backend: str = "pyaudio"
     audio_alsa_device: Optional[str] = None
     dataset_registry_key: str = "multimodal-lerobot"
+    gripper_control_mode: str = "continuous"
+
+
+GRIPPER_BINARY_THRESHOLD = 0.5
 
 
 class ViewerStreamSubscriber:
@@ -959,6 +963,8 @@ class TeleopDatasetController:
     ):
         self.config = config
         self.arm_to_use = arm_to_use
+        self._discrete_gripper = config.gripper_control_mode == "discrete"
+        self._gripper_threshold = GRIPPER_BINARY_THRESHOLD
         self.recorder = DatasetRecorder(config)
         self.camera_source = (
             CameraFrameSource(config) if (config.enable_rgb or config.enable_depth) else None
@@ -1059,7 +1065,11 @@ class TeleopDatasetController:
         if joint_positions is None:
             return
         joint_positions = np.asarray(joint_positions, dtype=np.float32)
+        if self._discrete_gripper:
+            joint_positions = self._apply_binary_to_gripper_channels(joint_positions)
         action_vec = np.asarray(action, dtype=np.float32)
+        if self._discrete_gripper:
+            action_vec = self._apply_binary_to_gripper_channels(action_vec)
 
         torque_vec = None
         if self.config.enable_torque:
@@ -1088,6 +1098,8 @@ class TeleopDatasetController:
             gripper_vec: Optional[List[float]] = None
         else:
             gripper_vec = np.atleast_1d(np.asarray(gripper_pos, dtype=np.float32)).tolist()
+        if gripper_vec is not None and self._discrete_gripper:
+            gripper_vec = self._binarize_all(np.asarray(gripper_vec, dtype=np.float32)).tolist()
 
         rgb = None
         depth = None
@@ -1141,6 +1153,27 @@ class TeleopDatasetController:
         if self.audio_manager:
             self.audio_manager.stop()
         self.audio_manager = None
+
+    def _infer_gripper_indices(self, length: int) -> Tuple[int, ...]:
+        if length <= 0:
+            return tuple()
+        if self.arm_to_use == "both" and length % 2 == 0:
+            per_arm = length // 2
+            return (per_arm - 1, length - 1)
+        return (length - 1,)
+
+    def _apply_binary_to_gripper_channels(self, vector: np.ndarray) -> np.ndarray:
+        arr = np.asarray(vector, dtype=np.float32).copy()
+        indices = self._infer_gripper_indices(arr.shape[-1])
+        for idx in indices:
+            if 0 <= idx < arr.shape[-1]:
+                arr[idx] = 1.0 if arr[idx] >= self._gripper_threshold else 0.0
+        return arr
+
+    def _binarize_all(self, values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float32).copy()
+        arr[:] = np.where(arr >= self._gripper_threshold, 1.0, 0.0)
+        return arr
 
     def _backend_candidates(self) -> List[str]:
         order = []
