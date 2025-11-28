@@ -312,8 +312,10 @@ def main() -> None:
     elif args.viewpoint_option == "coffee":
         print("Setting coffee viewpoint")
         viewpoint_arm_start_joints_state = [0.63, 2.19562420, -0.39444441, 0.05410521, 1.19380521, 0.87091930, 1.91288086, -1.83259571]
-    elif args.viewpoint_option == "cup":
+    elif args.viewpoint_option == "cup" or args.viewpoint_option == "whiteboard":
         viewpoint_arm_start_joints_state = [0.0, 1.54112573, -0.32812190, 0.81332343, 1.70518668, 0.58817596, 1.61792022, -0.66846110]
+    elif args.viewpoint_option == "engine":
+        viewpoint_arm_start_joints_state = [0.0, 1.90240888, -1.59697627, -0.16755161, 1.00880031, 1.03498025, 1.71042267, -0.58817596]
     elif args.viewpoint_option == "active":
         print("Active viewpoint has not been implemented yet")
         viewpoint_arm_start_joints_state = None
