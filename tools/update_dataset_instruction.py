@@ -12,7 +12,7 @@ import argparse
 import json
 import shutil
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Tuple
 
 
 def _load_meta(meta_path: Path) -> dict:
@@ -32,21 +32,42 @@ def _normalize_tasks(tasks: Iterable[str] | None, fallback: str) -> list[str]:
     return task_list
 
 
-def _apply_updates(meta: dict, new_instruction: str, new_tasks: list[str], update_tasks: bool) -> tuple[int, int]:
+def _apply_updates(meta: dict, new_instruction: str, new_tasks: List[str], update_tasks: bool) -> Tuple[int, int]:
     datalist = meta.get("datalist")
     if not isinstance(datalist, list):
         raise ValueError("meta/info.json does not contain a valid 'datalist' list")
 
     instruction_updates = 0
     task_updates = 0
-    for entry in datalist:
-        if entry.get("instruction") != new_instruction:
-            entry["instruction"] = new_instruction
+    updated_entries: list[dict] = []
+    for idx, entry in enumerate(datalist):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Entry #{idx} in datalist is not an object")
+        new_entry = dict(entry)
+        if new_entry.get("instruction") != new_instruction:
+            new_entry["instruction"] = new_instruction
             instruction_updates += 1
-        if update_tasks and entry.get("tasks") != new_tasks:
-            entry["tasks"] = list(new_tasks)
+        if update_tasks and new_entry.get("tasks") != new_tasks:
+            new_entry["tasks"] = list(new_tasks)
             task_updates += 1
+        updated_entries.append(new_entry)
+
+    meta["datalist"] = updated_entries
     return instruction_updates, task_updates
+
+
+def _verify_updates(meta: dict, expected_instruction: str, expected_tasks: List[str], check_tasks: bool) -> None:
+    datalist = meta.get("datalist", [])
+    for idx, entry in enumerate(datalist):
+        instruction = entry.get("instruction")
+        if instruction != expected_instruction:
+            raise RuntimeError(
+                f"Instruction mismatch at entry #{idx}: expected '{expected_instruction}', found '{instruction}'"
+            )
+        if check_tasks and entry.get("tasks") != expected_tasks:
+            raise RuntimeError(
+                f"Tasks mismatch at entry #{idx}: expected {expected_tasks}, found {entry.get('tasks')}"
+            )
 
 
 def _backup_file(path: Path, suffix: str) -> Path:
@@ -101,6 +122,7 @@ def main() -> None:
         new_tasks=new_tasks,
         update_tasks=args.update_tasks,
     )
+    _verify_updates(meta, new_instruction, new_tasks, args.update_tasks)
     total_entries = len(meta.get("datalist", []))
 
     print(

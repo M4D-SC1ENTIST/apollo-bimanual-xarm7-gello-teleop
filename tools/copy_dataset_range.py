@@ -13,13 +13,17 @@ Example:
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import shutil
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 
 
 def _list_episode_dirs(dataset_root: Path) -> List[Path]:
     """Return sorted episode directories under dataset_root."""
+    if not dataset_root.exists():
+        return []
     return sorted(
         (p for p in dataset_root.iterdir() if p.is_dir() and p.name.startswith("episode_")),
         key=lambda p: p.name,
@@ -68,6 +72,57 @@ def _determine_destination_start(dest_root: Path, override_start: int | None) ->
     return last_idx + 1
 
 
+def _meta_info_path(dataset_root: Path) -> Path:
+    return dataset_root / "meta" / "info.json"
+
+
+def _load_info(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"info.json not found: {path}")
+    return json.loads(path.read_text())
+
+
+def _write_info(path: Path, info: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2) + "\n")
+
+
+def _ensure_dest_info(path: Path, template: dict) -> None:
+    if path.exists():
+        return
+    fresh = copy.deepcopy(template)
+    fresh["datalist"] = []
+    _write_info(path, fresh)
+
+
+def _build_episode_entry_map(info: dict) -> dict[str, dict]:
+    mapping: dict[str, dict] = {}
+    for entry in info.get("datalist", []):
+        episode_name = Path(entry.get("top_path", "")).name
+        if episode_name:
+            mapping[episode_name] = entry
+    return mapping
+
+
+def _update_destination_info(
+    src_info: dict,
+    dest_info_path: Path,
+    copied_pairs: List[Tuple[str, Path]],
+) -> None:
+    if not copied_pairs:
+        return
+    dest_info = _load_info(dest_info_path)
+    src_map = _build_episode_entry_map(src_info)
+    datalist = dest_info.setdefault("datalist", [])
+    for episode_name, dest_dir in copied_pairs:
+        if episode_name not in src_map:
+            raise KeyError(f"Episode {episode_name} missing from source meta info")
+        new_entry = copy.deepcopy(src_map[episode_name])
+        new_entry["top_path"] = str(dest_dir.resolve())
+        datalist.append(new_entry)
+    _write_info(dest_info_path, dest_info)
+
+
 def copy_episode_range(
     src_dataset: Path,
     dst_dataset: Path,
@@ -81,10 +136,20 @@ def copy_episode_range(
     if not src_dataset.exists():
         raise FileNotFoundError(f"Source dataset not found: {src_dataset}")
     if not dst_dataset.exists():
-        raise FileNotFoundError(f"Destination dataset not found: {dst_dataset}")
+        if dry_run:
+            print(f"[dry-run] Destination dataset directory {dst_dataset} would be created.")
+        else:
+            dst_dataset.mkdir(parents=True, exist_ok=True)
+    elif not dry_run:
+        dst_dataset.mkdir(parents=True, exist_ok=True)
 
     src_episodes = _list_episode_dirs(src_dataset)
     selected = _resolve_episode_range(src_episodes, start_episode, end_episode)
+
+    src_info = _load_info(_meta_info_path(src_dataset))
+    dest_info_path = _meta_info_path(dst_dataset)
+    if not dry_run:
+        _ensure_dest_info(dest_info_path, src_info)
 
     dest_index = _determine_destination_start(dst_dataset, dest_start_index)
     print(
@@ -92,6 +157,7 @@ def copy_episode_range(
         f"({len(selected)} episodes) to {dst_dataset} starting at index {dest_index}."
     )
 
+    copied_pairs: List[Tuple[str, Path]] = []
     for offset, src_dir in enumerate(selected):
         dest_idx = dest_index + offset
         dest_dir = dst_dataset / _format_episode_name(dest_idx)
@@ -100,10 +166,12 @@ def copy_episode_range(
         print(f"  -> {src_dir.name} -> {dest_dir.name}")
         if not dry_run:
             shutil.copytree(src_dir, dest_dir)
+            copied_pairs.append((src_dir.name, dest_dir))
 
     if dry_run:
         print("Dry run complete. No files were copied.")
     else:
+        _update_destination_info(src_info, dest_info_path, copied_pairs)
         print("Copy complete.")
 
 

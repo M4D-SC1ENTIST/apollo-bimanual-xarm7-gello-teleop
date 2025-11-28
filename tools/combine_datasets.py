@@ -13,12 +13,16 @@ Example:
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import shutil
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Sequence, Tuple
 
 
 def _list_episode_dirs(dataset_root: Path) -> List[Path]:
+    if not dataset_root.exists():
+        return []
     return sorted(
         (p for p in dataset_root.iterdir() if p.is_dir() and p.name.startswith("episode_")),
         key=lambda p: p.name,
@@ -46,17 +50,65 @@ def _determine_destination_start(dest_root: Path, override_start: int | None) ->
     return last_idx + 1
 
 
-def _copy_meta_if_needed(src: Path, dest: Path, enabled: bool) -> None:
-    if not enabled:
-        return
+def _copy_meta_if_needed(src: Path, dest: Path) -> bool:
     dest_meta = dest / "meta"
     if dest_meta.exists():
-        return
+        return False
     src_meta = src / "meta"
     if not src_meta.exists():
-        return
+        return False
     print(f"[combine] Copying meta from {src_meta} -> {dest_meta}")
     shutil.copytree(src_meta, dest_meta)
+    return True
+
+
+def _meta_info_path(dataset_root: Path) -> Path:
+    return dataset_root / "meta" / "info.json"
+
+
+def _load_info(path: Path) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"info.json not found: {path}")
+    return json.loads(path.read_text())
+
+
+def _write_info(path: Path, info: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(info, indent=2) + "\n")
+
+
+def _empty_clone(info: dict) -> dict:
+    clone = copy.deepcopy(info)
+    clone["datalist"] = []
+    return clone
+
+
+def _build_episode_entry_map(info: dict) -> dict[str, dict]:
+    mapping: dict[str, dict] = {}
+    for entry in info.get("datalist", []):
+        episode_name = Path(entry.get("top_path", "")).name
+        if episode_name:
+            mapping[episode_name] = entry
+    return mapping
+
+
+def _append_entries(
+    src_info: dict,
+    dest_info_path: Path,
+    copied_pairs: Sequence[Tuple[str, Path]],
+) -> None:
+    if not copied_pairs:
+        return
+    dest_info = _load_info(dest_info_path)
+    src_map = _build_episode_entry_map(src_info)
+    datalist = dest_info.setdefault("datalist", [])
+    for episode_name, dest_dir in copied_pairs:
+        if episode_name not in src_map:
+            raise KeyError(f"Episode {episode_name} missing from source meta info")
+        new_entry = copy.deepcopy(src_map[episode_name])
+        new_entry["top_path"] = str(dest_dir.resolve())
+        datalist.append(new_entry)
+    _write_info(dest_info_path, dest_info)
 
 
 def combine_datasets(
@@ -66,24 +118,43 @@ def combine_datasets(
     dry_run: bool,
     copy_meta: bool,
 ) -> None:
-    if not src_datasets:
+    src_list = list(src_datasets)
+    if not src_list:
         raise ValueError("At least one source dataset must be provided")
 
-    dest_dataset.mkdir(parents=True, exist_ok=True)
+    if not dest_dataset.exists():
+        if dry_run:
+            print(f"[dry-run] Destination dataset directory {dest_dataset} would be created.")
+        else:
+            dest_dataset.mkdir(parents=True, exist_ok=True)
+    elif not dry_run:
+        dest_dataset.mkdir(parents=True, exist_ok=True)
+
+    dest_info_path = _meta_info_path(dest_dataset)
+    if not dry_run:
+        meta_copied = _copy_meta_if_needed(src_list[0], dest_dataset) if copy_meta else False
+        if not dest_info_path.exists():
+            template_info = _load_info(_meta_info_path(src_list[0]))
+            _write_info(dest_info_path, _empty_clone(template_info))
+        elif meta_copied:
+            info = _load_info(dest_info_path)
+            info["datalist"] = []
+            _write_info(dest_info_path, info)
+
     dest_index = _determine_destination_start(dest_dataset, dest_start_index)
     copied_count = 0
 
-    for src in src_datasets:
+    for src in src_list:
         if not src.exists():
             raise FileNotFoundError(f"Source dataset not found: {src}")
-        _copy_meta_if_needed(src, dest_dataset, copy_meta)
-
+        src_info = _load_info(_meta_info_path(src))
         episodes = _list_episode_dirs(src)
         if not episodes:
             print(f"[combine] No episodes found in {src}, skipping")
             continue
 
         print(f"[combine] Merging {len(episodes)} episodes from {src} starting at index {dest_index}")
+        copied_pairs: List[Tuple[str, Path]] = []
         for episode_dir in episodes:
             dest_name = _format_episode_name(dest_index)
             dest_path = dest_dataset / dest_name
@@ -92,8 +163,12 @@ def combine_datasets(
             print(f"  -> {episode_dir} -> {dest_path}")
             if not dry_run:
                 shutil.copytree(episode_dir, dest_path)
+                copied_pairs.append((episode_dir.name, dest_path))
             dest_index += 1
             copied_count += 1
+
+        if not dry_run:
+            _append_entries(src_info, dest_info_path, copied_pairs)
 
     if dry_run:
         print(f"[combine] Dry run complete. {copied_count} episodes would be copied.")
